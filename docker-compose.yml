@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  wppconnect:
+    build:
+      context: .
+      dockerfile: docker/wppconnect/Dockerfile
+    container_name: tracky-wppconnect
+    restart: unless-stopped
+    environment:
+      - WPP_PORT=21465
+      - WPP_SECRET_KEY=${WPP_SECRET_KEY}
+      # Diretório dentro do container onde as sessions serão persistidas
+      - WPP_TOKEN_DIR=/data/wpp-sessions
+    ports:
+      - "21465:21465"
+    volumes:
+      # Persistência segura das sessões/arquivos gerados pelo WPPConnect
+      - wpp_sessions:/data/wpp-sessions
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:21465/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  wpp_sessions:
+    driver: local
