@@ -1,4 +1,4 @@
-import { Bell, Menu, Search, User, LogOut, Settings as SettingsIcon } from 'lucide-react'
+import { Bell, Menu, Search, User, LogOut, Settings as SettingsIcon, ArrowLeft } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -23,6 +23,19 @@ export function AdminHeader({ onMenuClick }: AdminHeaderProps) {
   const navigate = useNavigate()
   const { toast } = useToast()
 
+  const handleBack = () => {
+    try {
+      // If there is a previous entry in history, go back. Otherwise, fallback to /admin
+      if (window.history.length > 1) {
+        navigate(-1)
+      } else {
+        navigate('/admin')
+      }
+    } catch (e) {
+      navigate('/admin')
+    }
+  }
+
   const handleLogout = async () => {
     await supabase.auth.signOut()
     toast({
@@ -44,6 +57,18 @@ export function AdminHeader({ onMenuClick }: AdminHeaderProps) {
         <Menu className="h-5 w-5" />
       </Button>
 
+      {/* Back button - mais à esquerda, mostra texto em md+ */}
+      <Button
+        variant="ghost"
+        onClick={handleBack}
+        className="hidden md:inline-flex items-center gap-2"
+        aria-label="Voltar para painel"
+        title="Voltar para painel"
+      >
+        <ArrowLeft className="h-5 w-5" />
+        <span className="text-sm">Voltar para painel</span>
+      </Button>
+
       {/* Search */}
       <div className="flex-1 max-w-md">
         <div className="relative">
@@ -58,6 +83,16 @@ export function AdminHeader({ onMenuClick }: AdminHeaderProps) {
 
       {/* Actions */}
       <div className="flex items-center gap-2">
+        {/* Back button (go to previous page) - placed on the right side of header actions */}
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={handleBack}
+          aria-label="Voltar"
+          title="Voltar"
+        >
+          <ArrowLeft className="h-5 w-5" />
+        </Button>
         {/* Notifications */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
