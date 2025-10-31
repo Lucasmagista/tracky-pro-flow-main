@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { CheckCircle, AlertTriangle, XCircle, ArrowRight, RefreshCw } from "lucide-react";
+import { CheckCircle, AlertTriangle, XCircle, ArrowRight, RefreshCw, X } from "lucide-react";
 
 interface CSVFieldMapping {
   csvColumn: string;
@@ -108,7 +108,7 @@ const CSVMapping: React.FC<CSVMappingProps> = ({
         ...mapping,
         systemField: bestMatch,
         required: isRequired,
-        validationStatus: bestMatch ? 'valid' : 'unmapped' as const,
+        validationStatus: bestMatch ? 'valid' as const : 'unmapped' as const,
       };
     });
 
@@ -126,7 +126,7 @@ const CSVMapping: React.FC<CSVMappingProps> = ({
             ...mapping,
             systemField,
             required: systemFieldInfo?.required || false,
-            validationStatus: systemField ? 'valid' : 'unmapped' as const,
+            validationStatus: systemField ? 'valid' as const : 'unmapped' as const,
           };
         }
         return mapping;
@@ -144,20 +144,20 @@ const CSVMapping: React.FC<CSVMappingProps> = ({
     // Atualizar status de validação
     setMappings(prevMappings =>
       prevMappings.map(mapping => {
-        let status: 'valid' | 'warning' | 'error' | 'unmapped' = 'unmapped';
+        let status: 'valid' | 'warning' | 'error' | 'unmapped' = 'unmapped' as const;
 
         if (mapping.systemField) {
           if (SYSTEM_FIELDS.find(f => f.key === mapping.systemField)?.required) {
-            status = 'valid';
+            status = 'valid' as const;
           } else {
-            status = 'valid';
+            status = 'valid' as const;
           }
         }
 
         // Verificar duplicatas
         const duplicateCount = prevMappings.filter(m => m.systemField === mapping.systemField).length;
         if (duplicateCount > 1 && mapping.systemField) {
-          status = 'error';
+          status = 'error' as const;
         }
 
         return { ...mapping, validationStatus: status };
@@ -272,22 +272,33 @@ const CSVMapping: React.FC<CSVMappingProps> = ({
                       {mapping.sampleValue || '-'}
                     </TableCell>
                     <TableCell>
-                      <Select
-                        value={mapping.systemField}
-                        onValueChange={(value) => updateMapping(mapping.csvColumn, value)}
-                      >
-                        <SelectTrigger className="w-full">
-                          <SelectValue placeholder="Selecione um campo..." />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="">Não mapear</SelectItem>
-                          {SYSTEM_FIELDS.map(field => (
-                            <SelectItem key={field.key} value={field.key}>
-                              {field.label} {field.required && '*'}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                      <div className="flex items-center gap-2">
+                        <Select
+                          value={mapping.systemField}
+                          onValueChange={(value) => updateMapping(mapping.csvColumn, value)}
+                        >
+                          <SelectTrigger className="flex-1">
+                            <SelectValue placeholder="Selecione um campo..." />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {SYSTEM_FIELDS.map(field => (
+                              <SelectItem key={field.key} value={field.key}>
+                                {field.label} {field.required && '*'}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        {mapping.systemField && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => updateMapping(mapping.csvColumn, '')}
+                            className="h-8 w-8 p-0"
+                          >
+                            <X className="w-4 h-4" />
+                          </Button>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>
                       {mapping.required && (

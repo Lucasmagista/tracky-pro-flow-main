@@ -66,28 +66,73 @@ export const useCarrierDetection = () => {
   const detectCarrier = (trackingCode: string): string => {
     const code = trackingCode.toUpperCase().replace(/\s/g, '');
 
-    // Padrões de códigos de rastreamento brasileiros
-    if (/^[A-Z]{2}\d{9}[A-Z]{2}$/.test(code)) {
+    // Correios - Padrões mais específicos primeiro
+    if (/^[A-Z]{2}\d{9}[A-Z]{2}$/.test(code) || /^[A-Z]{2}\d{10}[A-Z]{2}$/.test(code)) {
       return 'Correios';
     }
 
-    if (/^[A-Z]{2}\d{10}[A-Z]{2}$/.test(code)) {
-      return 'Correios';
-    }
-
-    if (/^\d{12,14}$/.test(code)) {
+    // Jadlog - Códigos numéricos de 12-14 dígitos ou iniciando com JD/SM
+    if (/^JD\d{10,12}$/.test(code) || /^SM\d{10,12}$/.test(code) || /^\d{12,14}$/.test(code)) {
       return 'Jadlog';
     }
 
-    if (/^[A-Z]{2}\d{8}[A-Z]{2}$/.test(code)) {
+    // Loggi - Códigos iniciando com LG
+    if (/^LG\d{9,11}[A-Z]{0,2}$/.test(code)) {
+      return 'Loggi';
+    }
+
+    // Total Express - Códigos iniciando com TE
+    if (/^TE\d{9,11}[A-Z]{0,2}$/.test(code)) {
       return 'Total Express';
     }
 
-    if (/^\d{10}$/.test(code)) {
+    // Azul Cargo - Códigos iniciando com AC
+    if (/^AC\d{9,11}[A-Z]{0,2}$/.test(code)) {
       return 'Azul Cargo';
     }
 
-    // Padrão genérico
+    // Buslog - Códigos numéricos longos ou iniciando com BL
+    if (/^BL\d{10,14}$/.test(code) || /^\d{15,20}$/.test(code)) {
+      return 'Buslog';
+    }
+
+    // LATAM Cargo - Códigos iniciando com LC
+    if (/^LC\d{8,12}$/.test(code)) {
+      return 'LATAM Cargo';
+    }
+
+    // TNT Mercúrio - Códigos iniciando com TM
+    if (/^TM\d{8,12}$/.test(code)) {
+      return 'TNT Mercúrio';
+    }
+
+    // DHL - Códigos iniciando com BR ou padrões internacionais
+    if (/^BR\d{10,12}$/.test(code) || /^\d{10}$/.test(code)) {
+      // Verificar se não é outro carrier primeiro
+      if (!code.startsWith('BR') || code.length === 10) {
+        return 'DHL';
+      }
+    }
+
+    // FedEx - Códigos alfanuméricos específicos
+    if (/^[0-9]{12,15}$/.test(code) || /^[A-Z]{2}\d{9}[A-Z]{2}$/.test(code)) {
+      // Verificar se não é Correios
+      if (!(/^[A-Z]{2}\d{9}[A-Z]{2}$/.test(code) && code.length === 13)) {
+        return 'FedEx';
+      }
+    }
+
+    // UPS - Códigos alfanuméricos
+    if (/^[A-Z0-9]{18}$/.test(code) || /^1Z[A-Z0-9]{15}$/.test(code)) {
+      return 'UPS';
+    }
+
+    // Transportadoras regionais comuns
+    if (/^SEDEX/i.test(code) || /^PAC/i.test(code)) {
+      return 'Correios';
+    }
+
+    // Padrão genérico - assumir Correios para códigos não identificados
     return 'Correios';
   };
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -85,6 +85,16 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
   // Estado para templates compatíveis
   const [compatibleTemplates, setCompatibleTemplates] = useState<CSVTemplate[]>([]);
   const [selectedTemplate, setSelectedTemplate] = useState<string>('');
+
+  // Ref para controlar se o componente está montado
+  const isMountedRef = useRef(true);
+
+  // Cleanup quando o componente for desmontado
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Aplicar template selecionado
   const handleApplyTemplate = async (templateId: string) => {
@@ -651,14 +661,24 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
       suggestions.push('💡 Todos os campos foram validados com sucesso!');
     }
 
-    setRealTimeValidation({
-      isValid: alerts.filter(a => a.type === 'error').length === 0,
-      alerts,
-      qualityScore,
-      suggestions,
-      previewData
-    });
+    // Só atualizar estado se o componente ainda estiver montado
+    if (isMountedRef.current) {
+      setRealTimeValidation({
+        isValid: alerts.filter(a => a.type === 'error').length === 0,
+        alerts,
+        qualityScore,
+        suggestions,
+        previewData
+      });
+    }
   }, [csvSampleData, validateTrackingCodes, validateCEPs, detectDuplicates, businessRules, validateBusinessRules, seasonalPatterns, analyzeSeasonalPatterns, fraudPatterns, analyzeFraudPatterns, csvHeaders, generateMappingSuggestions]);
+
+  // Função segura para atualizar estado apenas se o componente estiver montado
+  const safeSetState = (updater: (prev: RealTimeValidation) => RealTimeValidation) => {
+    if (isMountedRef.current) {
+      setRealTimeValidation(updater);
+    }
+  };
 
   // Executar análise inteligente ao carregar
   useEffect(() => {
@@ -685,7 +705,9 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
 
         // Buscar templates compatíveis
         const compatible = findCompatibleTemplates(csvHeaders);
-        setCompatibleTemplates(compatible);
+        if (isMountedRef.current) {
+          setCompatibleTemplates(compatible);
+        }
 
         // Executar validação em tempo real inicial
         performRealTimeValidation(initialMappings);
@@ -700,8 +722,11 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
           sampleValues: csvSampleData.slice(0, 3).map(row => row[header] || ''),
           validationErrors: ['Falha na análise automática']
         }));
-        setMappings(fallbackMappings);
-        setIsAnalyzed(true);
+
+        if (isMountedRef.current) {
+          setMappings(fallbackMappings);
+          setIsAnalyzed(true);
+        }
       }
     };
 
@@ -714,27 +739,27 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
       prevMappings.map(mapping => {
         if (mapping.csvColumn === csvColumn) {
           const systemFieldInfo = SYSTEM_FIELDS.find(f => f.key === systemField);
-          const updatedMapping = {
+          return {
             ...mapping,
             detectedField: systemField,
             confidence: systemField ? 1.0 : 0, // Mapeamento manual tem confiança máxima
             reasoning: systemField ? 'Mapeado manualmente pelo usuário' : 'Desmapeado pelo usuário',
             validationErrors: []
           };
-
-          // Executar validação em tempo real após atualização
-          setTimeout(() => {
-            const newMappings = prevMappings.map(m =>
-              m.csvColumn === csvColumn ? updatedMapping : m
-            );
-            performRealTimeValidation(newMappings);
-          }, 100);
-
-          return updatedMapping;
         }
         return mapping;
       })
     );
+
+    // Executar validação em tempo real após atualização
+    setTimeout(() => {
+      if (isMountedRef.current) {
+        setMappings(currentMappings => {
+          performRealTimeValidation(currentMappings);
+          return currentMappings;
+        });
+      }
+    }, 100);
   };
 
   // Verificar se pode prosseguir
@@ -842,53 +867,41 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
 
   return (
     <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Target className="w-5 h-5" />
-            Mapeamento Inteligente de Campos CSV
-          </CardTitle>
-          <CardDescription>
-            Nossa IA analisou seu arquivo e identificou automaticamente os campos.
-            Campos obrigatórios devem ser mapeados para continuar.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {/* Status da análise */}
-          {analysisResult && (
-            <Alert>
-              <Sparkles className="h-4 w-4" />
-              <AlertDescription>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span>Confiança geral da análise:</span>
-                    <span className="font-medium">
-                      {Math.round(analysisResult.confidence * 100)}%
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span>Campos detectados automaticamente:</span>
-                    <span className="font-medium">
-                      {analysisResult.detectedFields.filter((d: DetectedField) => d.detectedField).length} / {csvHeaders.length}
-                    </span>
-                  </div>
-                  {analysisResult.suggestions.length > 0 && (
-                    <div className="mt-3 pt-3 border-t">
-                      <p className="font-medium text-sm mb-2">💡 Sugestões:</p>
-                      <ul className="text-sm space-y-1">
-                        {analysisResult.suggestions.map((suggestion: string, index: number) => (
-                          <li key={index} className="flex items-start gap-2">
-                            <span className="text-primary">•</span>
-                            <span>{suggestion}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
+      {/* Status da análise */}
+      {analysisResult && (
+        <Alert>
+          <Sparkles className="h-4 w-4" />
+          <AlertDescription>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span>Confiança geral da análise:</span>
+                <span className="font-medium">
+                  {Math.round(analysisResult.confidence * 100)}%
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Campos detectados automaticamente:</span>
+                <span className="font-medium">
+                  {analysisResult.detectedFields.filter((d: DetectedField) => d.detectedField).length} / {csvHeaders.length}
+                </span>
+              </div>
+              {analysisResult.suggestions.length > 0 && (
+                <div className="mt-3 pt-3 border-t">
+                  <p className="font-medium text-sm mb-2">💡 Sugestões:</p>
+                  <ul className="text-sm space-y-1">
+                    {analysisResult.suggestions.map((suggestion: string, index: number) => (
+                      <li key={index} className="flex items-start gap-2">
+                        <span className="text-primary">•</span>
+                        <span>{suggestion}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
-              </AlertDescription>
-            </Alert>
-          )}
+              )}
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
 
           {/* Templates Compatíveis */}
           {compatibleTemplates.length > 0 && (
@@ -1224,8 +1237,8 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
             </AlertDescription>
           </Alert>
 
-          {/* Ações */}
-          <div className="flex justify-end gap-3 pt-4 border-t">
+          {/* Ações - Fixadas na parte inferior */}
+          <div className="flex justify-end gap-3 pt-4 border-t bg-background sticky bottom-0">
             <Button variant="outline" onClick={onCancel}>
               Cancelar
             </Button>
@@ -1238,8 +1251,6 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
               Continuar com Importação
             </Button>
           </div>
-        </CardContent>
-      </Card>
 
       {/* Ajuda */}
       <Card className="bg-muted/30">

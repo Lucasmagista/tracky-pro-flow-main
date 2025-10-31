@@ -20,8 +20,10 @@ import { useWooCommerceIntegrationReal } from "@/hooks/useWooCommerceIntegration
 import { useMercadoLivreIntegrationReal } from "@/hooks/useMercadoLivreIntegrationReal";
 import { useCarrierDetection } from "@/hooks/useTracking";
 import EmptyState from "@/components/EmptyState";
-import CSVMapping from "@/components/CSVMapping";
+import SmartCSVMapping from "@/components/SmartCSVMapping";
 import { ImportHistory } from "@/components/ImportHistory";
+import { ImportMetricsDashboard } from "@/components/ImportMetricsDashboard";
+import { MappingTemplatesManager, MappingTemplate } from "@/components/MappingTemplatesManager";
 
 interface ParsedOrder {
   tracking_code: string;
@@ -41,6 +43,35 @@ interface ParsedOrder {
   quantity?: string;
   order_number?: string;
   notes?: string;
+  // Campos adicionais da NuvemShop
+  sku?: string;
+  channel?: string;
+  seller?: string;
+  payment_method?: string;
+  cpf_cnpj?: string;
+  delivery_address?: string;
+  delivery_number?: string;
+  delivery_complement?: string;
+  delivery_neighborhood?: string;
+  delivery_city?: string;
+  delivery_state?: string;
+  delivery_zipcode?: string;
+  delivery_country?: string;
+  subtotal?: string;
+  discount?: string;
+  shipping_cost?: string;
+  total?: string;
+  payment_status?: string;
+  order_status?: string;
+  shipping_status?: string;
+  product_value?: string;
+  // Campos adicionais para datas e transações
+  payment_date?: string;
+  shipping_date?: string;
+  transaction_id?: string;
+  physical_product?: string;
+  cancellation_date?: string;
+  cancellation_reason?: string;
 }
 
 interface ImportResult {
@@ -54,9 +85,90 @@ interface ImportResult {
   }>;
 }
 
+interface ImportMetrics {
+  totalOrders: number;
+  processedOrders: number;
+  successfulImports: number;
+  failedImports: number;
+  warningImports: number;
+  startTime: Date;
+  estimatedEndTime?: Date;
+  currentChunk: number;
+  totalChunks: number;
+  averageProcessingTime: number;
+  memoryUsage?: number;
+  networkRequests: number;
+  errors: Array<{
+    code: string;
+    message: string;
+    count: number;
+  }>;
+  warnings: Array<{
+    code: string;
+    message: string;
+    count: number;
+  }>;
+}
+
 const ImportOrders = () => {
   const { user } = useAuth();
   const { detectCarrier } = useCarrierDetection();
+
+  // Função para gerenciar notificações push
+  const requestNotificationPermission = async (): Promise<boolean> => {
+    if (!('Notification' in window)) {
+      console.warn('Este navegador não suporta notificações push');
+      return false;
+    }
+
+    if (Notification.permission === 'granted') {
+      return true;
+    }
+
+    if (Notification.permission === 'denied') {
+      return false;
+    }
+
+    try {
+      const permission = await Notification.requestPermission();
+      return permission === 'granted';
+    } catch (error) {
+      console.error('Erro ao solicitar permissão de notificação:', error);
+      return false;
+    }
+  };
+
+  // Função para mostrar notificação push
+  const showImportNotification = (result: ImportResult, totalTime: number) => {
+    if (!('Notification' in window) || Notification.permission !== 'granted') {
+      return;
+    }
+
+    const title = result.success > 0 ? '✅ Importação Concluída!' : '❌ Importação Finalizada';
+    const body = result.success > 0
+      ? `${result.success} pedidos importados com sucesso em ${totalTime.toFixed(1)}s`
+      : `Importação finalizada. ${result.errors} erros encontrados.`;
+
+    const notification = new Notification(title, {
+      body,
+      icon: '/favicon.ico',
+      badge: '/favicon.ico',
+      tag: 'import-completion',
+      requireInteraction: false,
+      silent: false
+    });
+
+    // Auto-close após 5 segundos
+    setTimeout(() => {
+      notification.close();
+    }, 5000);
+
+    // Click na notificação volta para a página
+    notification.onclick = () => {
+      window.focus();
+      notification.close();
+    };
+  };
   const [manualOrder, setManualOrder] = useState({
     trackingCode: "",
     customerName: "",
@@ -70,6 +182,10 @@ const ImportOrders = () => {
   const [showPreview, setShowPreview] = useState(false);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [showResults, setShowResults] = useState(false);
+
+  // Estados para métricas de importação
+  const [importMetrics, setImportMetrics] = useState<ImportMetrics | null>(null);
+  const [showMetrics, setShowMetrics] = useState(false);
 
   // Estados para mapeamento CSV
   const [showMapping, setShowMapping] = useState(false);
@@ -160,8 +276,165 @@ const ImportOrders = () => {
     return !isNaN(num) && num > 0 && num <= 999;
   };
 
+  // Função para validar CPF/CNPJ brasileiro
+  const validateCpfCnpj = (cpfCnpj: string): boolean => {
+    if (!cpfCnpj) return true; // Campo opcional
+
+    const cleanValue = cpfCnpj.replace(/\D/g, '');
+
+    // CPF: 11 dígitos
+    if (cleanValue.length === 11) {
+      return validateCpf(cleanValue);
+    }
+
+    // CNPJ: 14 dígitos
+    if (cleanValue.length === 14) {
+      return validateCnpj(cleanValue);
+    }
+
+    return false;
+  };
+
+  // Função auxiliar para validar CPF
+  const validateCpf = (cpf: string): boolean => {
+    if (cpf.length !== 11) return false;
+
+    // Verifica se todos os dígitos são iguais
+    if (/^(\d)\1+$/.test(cpf)) return false;
+
+    // Calcula primeiro dígito verificador
+    let sum = 0;
+    for (let i = 0; i < 9; i++) {
+      sum += parseInt(cpf.charAt(i)) * (10 - i);
+    }
+    let remainder = (sum * 10) % 11;
+    if (remainder === 10) remainder = 0;
+    if (remainder !== parseInt(cpf.charAt(9))) return false;
+
+    // Calcula segundo dígito verificador
+    sum = 0;
+    for (let i = 0; i < 10; i++) {
+      sum += parseInt(cpf.charAt(i)) * (11 - i);
+    }
+    remainder = (sum * 10) % 11;
+    if (remainder === 10) remainder = 0;
+
+    return remainder === parseInt(cpf.charAt(10));
+  };
+
+  // Função auxiliar para validar CNPJ
+  const validateCnpj = (cnpj: string): boolean => {
+    if (cnpj.length !== 14) return false;
+
+    // Verifica se todos os dígitos são iguais
+    if (/^(\d)\1+$/.test(cnpj)) return false;
+
+    // Calcula primeiro dígito verificador
+    const weights1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+    let sum = 0;
+    for (let i = 0; i < 12; i++) {
+      sum += parseInt(cnpj.charAt(i)) * weights1[i];
+    }
+    let remainder = sum % 11;
+    if (remainder < 2) remainder = 0;
+    else remainder = 11 - remainder;
+    if (remainder !== parseInt(cnpj.charAt(12))) return false;
+
+    // Calcula segundo dígito verificador
+    const weights2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+    sum = 0;
+    for (let i = 0; i < 13; i++) {
+      sum += parseInt(cnpj.charAt(i)) * weights2[i];
+    }
+    remainder = sum % 11;
+    if (remainder < 2) remainder = 0;
+    else remainder = 11 - remainder;
+
+    return remainder === parseInt(cnpj.charAt(13));
+  };
+
+  // Função para validar endereço brasileiro
+  const validateAddress = (address: string, number: string, city: string, state: string, zipcode: string): { isValid: boolean; warnings: string[] } => {
+    const warnings: string[] = [];
+
+    // Validações básicas
+    if (address && address.trim().length < 3) {
+      warnings.push('Endereço deve ter pelo menos 3 caracteres');
+    }
+
+    if (number && !/^\d+[A-Za-z]?$/.test(number.trim())) {
+      warnings.push('Número deve conter apenas dígitos (opcionalmente seguido de uma letra)');
+    }
+
+    if (city && city.trim().length < 2) {
+      warnings.push('Cidade deve ter pelo menos 2 caracteres');
+    }
+
+    // Valida estado brasileiro
+    if (state) {
+      const validStates = [
+        'AC', 'AL', 'AP', 'AM', 'BA', 'CE', 'DF', 'ES', 'GO', 'MA', 'MT', 'MS', 'MG', 'PA', 'PB', 'PR', 'PE', 'PI', 'RJ', 'RN', 'RS', 'RO', 'RR', 'SC', 'SP', 'SE', 'TO'
+      ];
+      const normalizedState = state.trim().toUpperCase();
+      if (!validStates.includes(normalizedState)) {
+        warnings.push('Estado deve ser uma sigla válida do Brasil (ex: SP, RJ, MG)');
+      }
+    }
+
+    // Valida CEP brasileiro
+    if (zipcode) {
+      const cleanZipcode = zipcode.replace(/\D/g, '');
+      if (cleanZipcode.length !== 8) {
+        warnings.push('CEP deve ter exatamente 8 dígitos');
+      } else if (!/^[0-9]{8}$/.test(cleanZipcode)) {
+        warnings.push('CEP deve conter apenas números');
+      }
+    }
+
+    return {
+      isValid: warnings.length === 0,
+      warnings
+    };
+  };
+
+  // Função para processar CSV com mapeamento de campos
+  // Corrigir assinatura para aceitar apenas o mapping, conforme esperado pelo SmartCSVMapping
+  const processCSVWithMapping = async (mapping: Record<string, string>) => {
+    // Reconstrói os dados do CSV conforme o novo mapping
+    // csvHeaders: headers originais do arquivo
+    // csvSampleData: array de objetos {header: valor}
+    if (!csvHeaders || !csvSampleData || csvSampleData.length === 0) {
+      toast.error('Dados do CSV não encontrados para processar o mapeamento.');
+      setShowMapping(false);
+      return;
+    }
+
+    // Gera os headers mapeados (ordem do sistema)
+    const mappedHeaders = Object.keys(mapping);
+    // Gera as linhas de dados conforme o mapping
+    const csvLines = [
+      mappedHeaders.join(','),
+      ...csvSampleData.map(rowObj => {
+        return mappedHeaders.map(header => {
+          const originalHeader = mapping[header];
+          const value = rowObj[originalHeader] || '';
+          // Escapar valores que contenham vírgulas ou aspas
+          return value.includes(',') || value.includes('"') ? `"${value.replace(/"/g, '""')}"` : value;
+        }).join(',');
+      })
+    ];
+
+    const csvText = csvLines.join('\n');
+
+    // Processa os pedidos usando a função existente
+    const parsedOrders = await processCSVData(csvText);
+    setParsedOrders(parsedOrders);
+    setShowMapping(false);
+    setShowPreview(true);
+  };
+
   // Função para processar e validar dados CSV aprimorada
-  const processCSVData = (text: string): ParsedOrder[] => {
+  const processCSVData = async (text: string): Promise<ParsedOrder[]> => {
     const lines = text.split('\n').filter(line => line.trim() && !line.trim().startsWith('#'));
 
     if (lines.length < 2) return [];
@@ -218,58 +491,164 @@ const ImportOrders = () => {
       });
 
       // Mapeamento de campos com fallbacks para compatibilidade
-      const trackingCode = order.tracking_code || order['código_rastreio'] || '';
-      const customerName = order.customer_name || order['nome_cliente'] || '';
-      const customerEmail = order.customer_email || order['email_cliente'] || '';
-      const customerPhone = order.customer_phone || order['telefone'] || order['phone'] || '';
-      const carrierInput = order.carrier || order['transportadora'] || '';
-      const orderValue = order.order_value || order['valor_pedido'] || '';
-      const destination = order.destination || order['destino'] || '';
-      const orderDate = order.order_date || order['data_pedido'] || '';
-      const estimatedDelivery = order.estimated_delivery || order['previsao_entrega'] || '';
-      const productName = order.product_name || order['nome_produto'] || '';
-      const quantity = order.quantity || order['quantidade'] || '';
-      const orderNumber = order.order_number || order['numero_pedido'] || '';
-      const notes = order.notes || order['observacoes'] || '';
+      const trackingCode = order.tracking_code || order['código_rastreio'] || order['código de rastreio do envio'] || '';
+      const customerName = order.customer_name || order['nome_cliente'] || order['nome do comprador'] || order['nome para a entrega'] || '';
+      const customerEmail = order.customer_email || order['email_cliente'] || order['e-mail'] || '';
+      const customerPhone = order.customer_phone || order['telefone'] || order['phone'] || order['telefone para a entrega'] || '';
+      const carrierInput = order.carrier || order['transportadora'] || order['forma de entrega'] || '';
+      const orderValue = order.order_value || order['valor_pedido'] || order['total'] || '';
+      const destination = order.destination || order['destino'] || order['cidade'] || '';
+      const orderDate = order.order_date || order['data_pedido'] || order['data'] || '';
+      const estimatedDelivery = order.estimated_delivery || order['previsao_entrega'] || order['data de envio'] || '';
+      const productName = order.product_name || order['nome_produto'] || order['nome do produto'] || '';
+      const quantity = order.quantity || order['quantidade'] || order['quantidade comprada'] || '';
+      const orderNumber = order.order_number || order['numero_pedido'] || order['número do pedido'] || order['identificador do pedido'] || '';
+      const notes = order.notes || order['observacoes'] || order['anotações do comprador'] || order['anotações do vendedor'] || '';
 
-      // Validações aprimoradas
+      // Campos adicionais NuvemShop
+      const cpfCnpj = order.cpf_cnpj || order['cpf / cnpj'] || '';
+      const paymentMethod = order.payment_method || order['forma de pagamento'] || '';
+      const paymentStatus = order.payment_status || order['status do pagamento'] || '';
+      const orderStatus = order.order_status || order['status do pedido'] || '';
+      const shippingStatus = order.shipping_status || order['status do envio'] || '';
+      const subtotal = order.subtotal || order['subtotal'] || '';
+      const discount = order.discount || order['desconto'] || order['cupom de desconto'] || '';
+      const shippingCost = order.shipping_cost || order['valor do frete'] || '';
+      const productValue = order.product_value || order['valor do produto'] || '';
+      const sku = order.sku || order['sku'] || '';
+      const channel = order.channel || order['canal'] || '';
+      const seller = order.seller || order['vendedor'] || order['pessoa que registrou a venda'] || order['local de venda'] || '';
+      const paymentDate = order.payment_date || order['data de pagamento'] || '';
+      const shippingDate = order.shipping_date || order['data de envio'] || '';
+      const transactionId = order.transaction_id || order['identificador da transação no meio de pagamento'] || '';
+      const physicalProduct = order.physical_product || order['produto fisico'] || '';
+      const cancellationDate = order.cancellation_date || order['data e hora do cancelamento'] || '';
+      const cancellationReason = order.cancellation_reason || order['motivo do cancelamento'] || '';
+
+      // Campos de endereço NuvemShop
+      const deliveryAddress = order.delivery_address || order['endereço'] || '';
+      const deliveryNumber = order.delivery_number || order['número'] || '';
+      const deliveryComplement = order.delivery_complement || order['complemento'] || '';
+      const deliveryNeighborhood = order.delivery_neighborhood || order['bairro'] || '';
+      const deliveryCity = order.delivery_city || order['cidade'] || '';
+      const deliveryState = order.delivery_state || order['estado'] || '';
+      const deliveryZipcode = order.delivery_zipcode || order['código postal'] || '';
+      const deliveryCountry = order.delivery_country || order['país'] || '';
+
+      return {
+        tracking_code: trackingCode,
+        customer_name: customerName,
+        customer_email: customerEmail,
+        customer_phone: customerPhone,
+        carrier: carrierInput || '',
+        status: 'warning', // Status inicial válido para ParsedOrder
+        errors: [],
+        warnings: [],
+        // Campos adicionais
+        order_value: orderValue,
+        destination,
+        order_date: orderDate,
+        estimated_delivery: estimatedDelivery,
+        product_name: productName,
+        quantity,
+        order_number: orderNumber,
+        notes,
+        // Campos NuvemShop adicionais
+        cpf_cnpj: cpfCnpj,
+        payment_method: paymentMethod,
+        payment_status: paymentStatus,
+        order_status: orderStatus,
+        shipping_status: shippingStatus,
+        subtotal,
+        discount,
+        shipping_cost: shippingCost,
+        product_value: productValue,
+        sku,
+        channel,
+        seller,
+        payment_date: paymentDate,
+        shipping_date: shippingDate,
+        transaction_id: transactionId,
+        physical_product: physicalProduct,
+        cancellation_date: cancellationDate,
+        cancellation_reason: cancellationReason,
+        // Campos de endereço NuvemShop
+        delivery_address: deliveryAddress,
+        delivery_number: deliveryNumber,
+        delivery_complement: deliveryComplement,
+        delivery_neighborhood: deliveryNeighborhood,
+        delivery_city: deliveryCity,
+        delivery_state: deliveryState,
+        delivery_zipcode: deliveryZipcode,
+        delivery_country: deliveryCountry,
+      };
+    });
+
+    // Detectar duplicatas antes de aplicar validações
+    const { duplicates, warnings: duplicateWarnings } = await detectDuplicates(parsedOrders);
+
+    // Aplicar validações e atualizar status considerando duplicatas
+    const validatedOrders = parsedOrders.map((order, index) => {
       const errors: string[] = [];
-      const warnings: string[] = [];
+      const warnings: string[] = [...duplicateWarnings];
+
+      // Verificar se este pedido é uma duplicata
+      const duplicateInfo = duplicates.find(d => d.new_order === order);
+      if (duplicateInfo) {
+        warnings.push(`Duplicata encontrada: pedido existente de ${duplicateInfo.existing_order.customer_name} (${duplicateInfo.existing_order.created_at})`);
+      }
 
       // Validações obrigatórias
-      if (!trackingCode.trim()) errors.push('Código de rastreio é obrigatório');
-      if (!customerName.trim()) errors.push('Nome do cliente é obrigatório');
-      if (!customerEmail.trim()) errors.push('Email do cliente é obrigatório');
+      if (!order.tracking_code.trim()) errors.push('Código de rastreio é obrigatório');
+      if (!order.customer_name.trim()) errors.push('Nome do cliente é obrigatório');
+      if (!order.customer_email.trim()) errors.push('Email do cliente é obrigatório');
 
       // Validações de formato
-      if (customerEmail && !validateEmail(customerEmail)) {
+      if (order.customer_email && !validateEmail(order.customer_email)) {
         errors.push('Email inválido');
       }
 
-      if (customerPhone && !validatePhone(customerPhone)) {
+      if (order.customer_phone && !validatePhone(order.customer_phone)) {
         warnings.push('Telefone pode estar em formato incorreto');
       }
 
-      if (orderValue && !validateCurrency(orderValue)) {
+      if (order.order_value && !validateCurrency(order.order_value)) {
         warnings.push('Valor do pedido deve estar no formato correto (ex: 99.90)');
       }
 
-      if (orderDate && !validateDate(orderDate)) {
+      if (order.order_date && !validateDate(order.order_date)) {
         warnings.push('Data do pedido deve estar no formato DD/MM/YYYY ou YYYY-MM-DD');
       }
 
-      if (estimatedDelivery && !validateDate(estimatedDelivery)) {
+      if (order.estimated_delivery && !validateDate(order.estimated_delivery)) {
         warnings.push('Data de entrega prevista deve estar no formato DD/MM/YYYY ou YYYY-MM-DD');
       }
 
-      if (quantity && !validateQuantity(quantity)) {
+      if (order.quantity && !validateQuantity(order.quantity)) {
         warnings.push('Quantidade deve ser um número inteiro positivo');
       }
 
+      // Validação de CPF/CNPJ
+      if (order.cpf_cnpj && !validateCpfCnpj(order.cpf_cnpj)) {
+        warnings.push('CPF/CNPJ inválido - deve ter 11 dígitos (CPF) ou 14 dígitos (CNPJ)');
+      }
+
+      // Validação de endereço brasileiro
+      const addressValidation = validateAddress(
+        order.delivery_address,
+        order.delivery_number,
+        order.delivery_city,
+        order.delivery_state,
+        order.delivery_zipcode
+      );
+      if (!addressValidation.isValid) {
+        warnings.push(...addressValidation.warnings);
+      }
+
       // Validação de código de rastreio
-      let finalCarrier = carrierInput;
-      if (trackingCode) {
-        const trackingValidation = validateTrackingCode(trackingCode);
+      let finalCarrier = order.carrier;
+      if (order.tracking_code) {
+        const trackingValidation = validateTrackingCode(order.tracking_code);
         if (!trackingValidation.isValid) {
           errors.push(...trackingValidation.errors);
         } else if (!finalCarrier) {
@@ -280,7 +659,7 @@ const ImportOrders = () => {
       // Carrier padrão se não especificado e não detectado
       if (!finalCarrier) {
         finalCarrier = 'Correios';
-        if (trackingCode) {
+        if (order.tracking_code) {
           warnings.push('Transportadora não especificada, assumindo Correios');
         }
       }
@@ -290,25 +669,15 @@ const ImportOrders = () => {
       else if (warnings.length > 0) status = 'warning';
 
       return {
-        tracking_code: trackingCode,
-        customer_name: customerName,
-        customer_email: customerEmail,
-        customer_phone: customerPhone,
+        ...order,
         carrier: finalCarrier,
         status,
         errors,
         warnings,
-        // Campos adicionais
-        order_value: orderValue,
-        destination,
-        order_date: orderDate,
-        estimated_delivery: estimatedDelivery,
-        product_name: productName,
-        quantity,
-        order_number: orderNumber,
-        notes,
       };
     });
+
+    setParsedOrders(validatedOrders);
   };
 
   // Função para conectar com Shopify - OAuth real
@@ -368,75 +737,94 @@ const ImportOrders = () => {
     await mercadolivre.importOrders();
   };
 
-  // Função para baixar modelo CSV aprimorado
+  // Função para baixar modelo CSV aprimorado baseado na NuvemShop
   const downloadCSVTemplate = () => {
-    const csvContent = `# Tracky Pro Flow - Modelo de Importação de Pedidos
-# Versão: 2.0 - Atualizado em ${new Date().toLocaleDateString('pt-BR')}
-# Este arquivo contém todas as colunas suportadas para importação de pedidos
+    const csvContent = `# Modelo de Importação - Compatível com NuvemShop
+# Tracky Pro Flow - Atualizado para NuvemShop
+# Versão: 3.0 - Atualizado em ${new Date().toLocaleDateString('pt-BR')}
+# Este arquivo usa a mesma estrutura da NuvemShop para máxima compatibilidade
 # Campos obrigatórios estão marcados com * (asterisco)
 # Campos opcionais podem ser deixados em branco
 #
-# INSTRUÇÕES IMPORTANTES:
-# 1. A primeira linha deve conter exatamente os cabeçalhos mostrados abaixo
-# 2. Não altere a ordem das colunas
-# 3. Use aspas duplas para textos que contenham vírgulas
-# 4. Datas devem estar no formato DD/MM/YYYY ou YYYY-MM-DD
-# 5. Valores monetários devem usar ponto como separador decimal (ex: 99.90)
-# 6. Telefones devem incluir DDD (ex: (11) 98765-4321)
-# 7. Códigos de rastreio devem seguir o padrão da transportadora
+# CAMPOS SUPORTADOS (Mapeamento Automático):
+# * Número do Pedido: Identificador único do pedido (order_number)
+# * E-mail: Email do cliente (customer_email) *
+# * Data: Data do pedido (order_date)
+# * Nome do comprador: Nome completo (customer_name) *
+# * Telefone: Telefone/WhatsApp (customer_phone)
+# * Código de rastreio do envio: Código de rastreio (tracking_code)
+# * Forma de Entrega: Transportadora (carrier)
+# * Total: Valor total do pedido (order_value)
+# * Cidade: Cidade de destino (destination)
+# * Estado: Estado de destino (destination)
+# * Nome do Produto: Nome do produto (product_name)
+# * Quantidade Comprada: Quantidade (quantity)
+# * Anotações do Comprador: Observações (notes)
+# * Anotações do Vendedor: Observações adicionais (notes)
 #
-# CAMPOS SUPORTADOS:
-# * tracking_code: Código de rastreio (obrigatório)
-# * customer_name: Nome completo do cliente (obrigatório)
-# * customer_email: Email do cliente (obrigatório)
-# * carrier: Transportadora (obrigatório se não for detectável pelo código)
-# customer_phone: Telefone/WhatsApp do cliente (opcional)
-# order_value: Valor total do pedido (opcional)
-# destination: Cidade/Estado de destino (opcional)
-# order_date: Data do pedido (opcional)
-# estimated_delivery: Data prevista de entrega (opcional)
-# product_name: Nome do produto (opcional)
-# quantity: Quantidade do produto (opcional)
-# order_number: Número do pedido na loja (opcional)
-# notes: Observações adicionais (opcional)
+# FORMATO DE DATAS:
+# - Use DD/MM/YYYY HH:mm (exemplo: 30/09/2025 21:15)
+# - Ou apenas DD/MM/YYYY (exemplo: 30/09/2025)
 #
-# EXEMPLOS DE CÓDIGOS DE RASTREIO POR TRANSPORTADORA:
-# Correios: BR123456789BR, BR123456789BR (11 dígitos + BR)
-# Jadlog: JD123456789012, JD1234567890123 (12-14 dígitos)
-# Total Express: TE123456789BR (11 dígitos + BR)
-# Azul Cargo: AC123456789BR (11 dígitos + BR)
-# Loggi: LG123456789BR (11 dígitos + BR)
+# TRANSPORTADORAS SUPORTADAS:
+# - Correios (códigos iniciam com BR)
+# - JadLog (códigos iniciam com JD ou SM)
+# - Loggi (códigos iniciam com LG)
+# - Total Express (códigos iniciam com TE)
+# - Azul Cargo (códigos iniciam com AC)
 #
-# FORMATO DO ARQUIVO CSV:
-# - Codificação: UTF-8
-# - Separador: Vírgula (,)
-# - Quebra de linha: LF (\n) ou CRLF (\r\n)
-# - Aspas: Use aspas duplas para campos com vírgulas ou quebras de linha
-#
-# DICAS PARA IMPORTAÇÃO BEM-SUCEDIDA:
-# - Verifique se todos os emails são válidos
-# - Confirme se os códigos de rastreio seguem o padrão da transportadora
-# - Use o preview antes de importar para verificar erros
-# - Campos vazios serão ignorados (exceto obrigatórios)
-# - O sistema detecta automaticamente a transportadora pelo código quando possível
+# DICAS IMPORTANTES:
+# 1. Mantenha os cabeçalhos exatamente como mostrado
+# 2. O sistema detecta automaticamente os campos pela análise inteligente
+# 3. Campos vazios são ignorados (exceto obrigatórios)
+# 4. Use aspas duplas para textos com vírgulas
+# 5. Salve em UTF-8 para caracteres especiais
 
-tracking_code*,customer_name*,customer_email*,carrier,customer_phone,order_value,destination,order_date,estimated_delivery,product_name,quantity,order_number,notes
-BR123456789BR,"João Silva Santos","joao.silva@email.com","Correios","(11) 98765-4321","299.90","São Paulo/SP","15/10/2024","20/10/2024","Smartphone Samsung Galaxy","1","PED-2024-001","Cliente solicitou entrega urgente"
-JD123456789012,"Maria Oliveira Costa","maria.oliveira@email.com","Jadlog","(21) 99876-5432","149.50","Rio de Janeiro/RJ","16/10/2024","22/10/2024","Notebook Dell Inspiron","1","PED-2024-002","Entrega em endereço comercial"
-TE123456789BR,"Carlos Eduardo Lima","carlos.lima@email.com","Total Express","(85) 98765-4321","89.90","Fortaleza/CE","17/10/2024","23/10/2024","Mouse Gamer Logitech","2","PED-2024-003","Cliente prefere entrega aos sábados"
-AC123456789BR,"Ana Paula Rodrigues","ana.paula@email.com","Azul Cargo","(31) 91234-5678","459.99","Belo Horizonte/MG","18/10/2024","25/10/2024","Monitor LG 27 polegadas","1","PED-2024-004","Endereço residencial - apartamento 1502"
-LG123456789BR,"Roberto Fernandes","roberto.fernandes@email.com","Loggi","(41) 99876-5432","79.90","Curitiba/PR","19/10/2024","24/10/2024","Teclado Mecânico RGB","1","PED-2024-005","Cliente solicitou contato prévio"
-BR234567890BR,"Fernanda Costa Santos","fernanda.costa@email.com","Correios","(71) 98765-4321","199.99","Salvador/BA","20/10/2024","26/10/2024","Fone de Ouvido Bluetooth","1","PED-2024-006","Entrega preferencialmente pela manhã"
-JD234567890123,"Lucas Pereira Oliveira","lucas.pereira@email.com","Jadlog","(51) 91234-5678","349.90","Porto Alegre/RS","21/10/2024","28/10/2024","SSD Kingston 1TB","1","PED-2024-007","Cliente trabalha em horário comercial"
-TE234567890BR,"Juliana Martins Silva","juliana.martins@email.com","Total Express","(62) 99876-5432","129.90","Goiânia/GO","22/10/2024","27/10/2024","Webcam Logitech HD","1","PED-2024-008","Endereço com portaria - avisar chegada"
-AC234567890BR,"Ricardo Santos Lima","ricardo.santos@email.com","Azul Cargo","(98) 98765-4321","599.99","São Luís/MA","23/10/2024","30/10/2024","Placa de Vídeo RTX 4060","1","PED-2024-009","Cliente solicitou nota fiscal junto com produto"
-LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(84) 91234-5678","69.90","Natal/RN","24/10/2024","29/10/2024","Mouse Pad Gamer XXL","1","PED-2024-010","Entrega em condomínio - aguardar liberação"`
+Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do Envio,Moeda,Subtotal,Desconto,Valor do Frete,Total,Nome do comprador*,CPF / CNPJ,Telefone,Nome para a entrega,Telefone para a entrega,Endereço,Número,Complemento,Bairro,Cidade,Código postal,Estado,País,Forma de Entrega,Forma de Pagamento,Cupom de Desconto,Anotações do Comprador,Anotações do Vendedor,Data de pagamento,Data de envio,Nome do Produto,Valor do Produto,Quantidade Comprada,SKU,Canal,Código de rastreio do envio,Identificador da transação no meio de pagamento,Identificador do pedido,Produto Fisico,Pessoa que registrou a venda,Local de venda,Vendedor,Data e hora do cancelamento,Motivo do cancelamento
+175,sebastiaocamara@gmail.com,30/09/2025 21:15,Aberto,Confirmado,Entregue,BRL,195.5,7.82,62,249.68,Sebastião Ramos da Câmara Filho,45929637415,(11) 98765-4321,Sebastião Ramos da Câmara Filho,(11) 98765-4321,Rua Gervásio Pires,436,1309,Boa Vista,Recife,50050070,Pernambuco,Brasil,JadLog via SmartEnvios,PagarMe,,Cliente solicitou entrega urgente,,30/09/2025,10/10/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),195.5,1,170-FREIJO-UN,Mobile,SM9681306764ZUJ,ch_96ADLzoIrF2aOQvW,1799093204,Sim,,,,,
+174,souzadeniseregina@gmail.com,30/09/2025 14:48,Aberto,Confirmado,Enviado,BRL,195.5,7.82,46.32,234,Dênise régina Souza,81288867972,(21) 99876-5432,Dênise régina Souza,(21) 99876-5432,Rua Desembargador Antônio Ferreira da Costa,3596,Sala 4,Zona I,Umuarama,87501200,Paraná,Brasil,JadLog via SmartEnvios,PagarMe,,Entrega em endereço comercial,,30/09/2025,01/10/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),195.5,1,170-FREIJO-UN,Mobile,SM0054088974ZUJ,ch_ObokR5DFyFnrVK9B,1798839261,Sim,,,,,
+171,alexandra_cogo@hotmail.com,29/09/2025 16:33,Aberto,Confirmado,Entregue,BRL,169.9,16.99,31.7,184.61,Alexandra Vedovatti Bueno Cogo,89493303934,(19) 99999-9999,Alexandra Vedovatti Bueno Cogo,(19) 99999-9999,Rua Antônio Rodrigues Moreira Neto,669,BL E-apto32,Jardim Paulicéia,Campinas,13060073,São Paulo,Brasil,Nuvem Envio Correios PAC,PagarMe,BEMVINDO10,,Cliente solicitou entrega rápida,,29/09/2025,02/10/2025,Mesa e Escrivaninha Multiuso Master 90x60cm (Freijó),169.9,1,185-FREIJO-UN,Loja virtual,SM2035534625ZUJ,ch_mlK83MFVbhlpNADj,1798221988,Sim,,,,,
+169,vaniaoliver67@gmail.com,29/09/2025 12:54,Aberto,Confirmado,Entregue,BRL,195.5,7.82,58.79,246.47,Edivania Alves de Oliveira,33784053840,(11) 99699-9999,Edivania Alves de Oliveira,(11) 99699-9999,Rua Comendador Cesar Alfieri,270,Casa 2 portão do lado,Parque São Luís,São Paulo,2840130,São Paulo,Brasil,Loggi via SmartEnvios,PagarMe,,Cliente prefere entrega pela manhã,,29/09/2025,03/10/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),195.5,1,170-FREIJO-UN,Mobile,SM8373299291ZUJ,ch_Qe1NWzVSELuYw7lX,1798076761,Sim,,,,,
+168,srpg30@gmail.com,29/09/2025 02:37,Aberto,Confirmado,Enviado,BRL,189.5,7.58,35.78,217.7,Sergio Guimarães,57195706672,(53) 20000-0000,Sergio Guimarães,(53) 20000-0000,Rua Batista de Figueiredo,127,Ap 501,Vila Paris,Belo Horizonte,30380720,Minas Gerais,Brasil,JadLog via SmartEnvios,PagarMe,,Entrega em apartamento,,29/09/2025,29/09/2025,Aparador e Buffet Roma Cobre (Off-White),189.5,1,351-OFFWHITE-OFFWHITE-UN,Mobile,SM7879020131ZUJ,ch_XP6A540CDCJ54pyR,1797866506,Sim,,,,,
+167,aroeirabraga@gmail.com,25/09/2025 18:43,Aberto,Confirmado,Entregue,BRL,180.9,0.00,38.74,219.64,Marcelo Aroeira Braga,28010833649,(53) 20000-0000,Marcelo Aroeira Braga,(53) 20000-0000,Avenida Prudente de Morais,287,Salas 1105-1106,Santo Antônio,Belo Horizonte,30350093,Minas Gerais,Brasil,JadLog via SmartEnvios,PagarMe,,Cliente trabalha em escritório,,26/09/2025,03/10/2025,Mesa e Escrivaninha Multiuso Grande Estilo Industrial (Gianduia),180.9,1,190-GIANDUIA-PRETO-UN,Mobile,SM8943585094ZUJ,ch_qErORWZhdhBldvxe,1792097280,Sim,,,,,
+166,taniareginapdias@hotmail.com,25/09/2025 13:23,Aberto,Confirmado,Entregue,BRL,428.8,58.32,69.27,439.75,Tania Dias,7867528822,(52) 00000-0000,Tania dias,(52) 00000-0000,Rua Alfredo Guedes,2020,SALA 11,Cidade Alta,Piracicaba,13419080,São Paulo,Brasil,JadLog via SmartEnvios,PagarMe,BEMVINDO10,,Cliente solicitou montagem,,25/09/2025,03/10/2025,Mesa e Escrivaninha Multiuso Grande Estilo Industrial (Gianduia),180.9,1,190-GIANDUIA-PRETO-UN,Loja virtual,SM1549375904ZUJ,ch_B9a0L4vs6seP5QwE,1795543874,Sim,,,,,
+165,cinthiadecor@hotmail.com,24/09/2025 22:31,Aberto,Confirmado,Entregue,BRL,372.9,50.71,133.6,455.79,Cinthia Virgínia Figueiredo,82538123534,(58) 00000-0000,Cinthia Virgínia Figueiredo,(58) 00000-0000,Avenida Deputado Pedro Valadares,900,603,Jardins,Aracaju,49025090,Sergipe,Brasil,JadLog via SmartEnvios,PagarMe,BEMVINDO10,,Entrega em condomínio,,24/09/2025,01/10/2025,Mesa de Jantar Dobrável Industrial 6 Lugares - Praticidade e Estilo em Qualquer Ambiente (Freijó),372.9,1,700-FREIJO-PRETO-UN,Mobile,SM2148862269ZUJ,ch_Z3OGLNrtVtmL1mMB,1795339074,Sim,,,,,
+163,nilo.goncalves@gmail.com,23/09/2025 21:20,Aberto,Confirmado,Entregue,BRL,745.8,0.00,93.01,838.81,Nilo Gonçalves,90514777753,(52) 19999-9999,Nilo Gonçalves,(52) 19999-9999,Rua João Vicente,1643,Sobrado,Marechal Hermes,Rio de Janeiro,21610210,Rio de Janeiro,Brasil,Buslog via SmartEnvios,PagarMe,,Cliente solicitou entrega discreta,,23/09/2025,07/10/2025,Mesa de Jantar Dobrável Industrial 6 Lugares - Praticidade e Estilo em Qualquer Ambiente (Gianduia),372.9,2,700-GIANDUIA-PRETO-UN,Mobile,SM1932805645ZUJ,ch_0YzPQyzcDXtbBGrK,1794658978,Sim,,,,,
+162,aryengracia@gmail.com,23/09/2025 20:59,Aberto,Confirmado,Entregue,BRL,195.5,26.59,29.59,198.5,Ary Engracia Garcia Neto,35042840800,(51) 70000-0000,Ary Engracia Garcia Neto,(51) 70000-0000,Estrada da Limeirinha,1560,Casa 295,Boa Vista,Boituva,18550000,São Paulo,Brasil,JadLog via SmartEnvios,PagarMe,BEMVINDO10,,Entrega em zona rural,,23/09/2025,29/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Gianduia),195.5,1,170-GIANDUIA-UN,Mobile,SM7543645922ZUJ,ch_aMVrKnWHYEiLqj0g,1794647880,Sim,,,,,
+161,mylka.sousa@visionone.com.br,23/09/2025 14:28,Aberto,Confirmado,Entregue,BRL,149.6,0.00,42.47,192.07,Cbv Cbv,6,16069E+12,(58) 20000-0000,Cbv CBV,(58) 20000-0000,Quadra SGAS 613,SN,BLOCO C,Asa Sul,Brasília,70200730,Distrito Federal,Brasil,JadLog via SmartEnvios,PagarMe,,Entrega em empresa,,30/09/2025,06/10/2025,Mesa Redonda Retrátil com Pés de Madeira Alta (Off-White),74.8,2,540-OFFWHITE-UN,Loja virtual,SM7410243632ZUJ,ch_1qoBjw6hDoUEWvm8,1794418137,Sim,,,,,
+160,lcbconsultoria2024@gmail.com,22/09/2025 20:03,Aberto,Confirmado,Entregue,BRL,372.9,50.71,138.16,460.35,Luiz Carlos Barboza,66716578820,(53) 49999-9999,Luiz Carlos Barboza,(53) 49999-9999,Rua Dário Meira,737,Ap 22 Condomínio Casaredo,Itapuã,Salvador,41620820,Bahia,Brasil,JadLog via SmartEnvios,PagarMe,BEMVINDO10,,Cliente solicitou contato prévio,,22/09/2025,01/10/2025,Mesa de Jantar Dobrável Industrial 6 Lugares - Praticidade e Estilo em Qualquer Ambiente (Freijó),372.9,1,700-FREIJO-PRETO-UN,Mobile,SM9030664589ZUJ,ch_PRy19JbF1Fo943lx,1793954222,Sim,,,,,
+159,izamaramoreira@bol.com.br,22/09/2025 12:25,Aberto,Confirmado,Entregue,BRL,157.9,6.32,29.03,180.61,Izamara Moreira,93000723820,(51) 69999-9999,Izamara Moreira,(51) 69999-9999,Rua Arnaud Capuzzo,125,Ap 42,Nova Aliança,Ribeirão Preto,14026594,São Paulo,Brasil,JadLog via SmartEnvios,PagarMe,,Entrega em apartamento,,22/09/2025,26/09/2025,Mesa e Escrivaninha Multiuso Estilo Industrial (Freijó),157.9,1,180-FREIJO-UN,Mobile,SM7748652172ZUJ,ch_Vjv857WCxCA5BZzD,1793670953,Sim,,,,,
+158,marinadiasdsantos@gmail.com,22/09/2025 10:21,Aberto,Confirmado,Entregue,BRL,195.5,19.55,41.4,217.35,Marina Dias,10337969647,(53) 19999-9999,Marina Dias,(53) 19999-9999,Rua Herbert Brant Aleixo,82,,Itapoã,Belo Horizonte,31710300,Minas Gerais,Brasil,JadLog via SmartEnvios,PagarMe,BEMVINDO10,,Cliente prefere entrega aos sábados,,22/09/2025,30/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),195.5,1,170-FREIJO-UN,Mobile,SM6034253200ZUJ,ch_4P0WrN8F1FRlMQjD,1793593220,Sim,,,,,
+157,58borboletas@terra.com.br,22/09/2025 09:07,Aberto,Confirmado,Entregue,BRL,195.5,0.00,33.01,228.51,Maria José Alves de Oliveira Oliveira,63179482168,(56) 60000-0000,Maria José Alves de Oliveira Oliveira,(56) 60000-0000,Rua Euclides Machado,341,Apto 102 globo edifício residence,Canto,Florianópolis,88070720,Santa Catarina,Brasil,JadLog via SmartEnvios,PagarMe,,Entrega em prédio,,23/09/2025,29/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Gianduia),195.5,1,170-GIANDUIA-UN,Mobile,SM4188198336ZUJ,ch_Bpko4RnTYTm4QKl8,1788948024,Sim,,,,,
+156,lucio.teixeira@terra.com.br,21/09/2025 20:17,Aberto,Confirmado,Entregue,BRL,169.9,23.11,49.04,195.83,Lucio Teixeira,17126000871,(51) 19799-9999,Lucio Teixeira,(51) 19799-9999,Rua 9 de Julho,267,Apto 3,Parque 9 de Julho,São Roque,18134020,São Paulo,Brasil,Sedex via SmartEnvios,PagarMe,BEMVINDO10,,Cliente trabalha até tarde,,21/09/2025,25/09/2025,Mesa e Escrivaninha Multiuso Master 90x60cm (Preto),169.9,1,185-PRETO-UN,Mobile,AB534093115BR,ch_5L1BJ6kfmf59VjpR,1792020404,Sim,,,,,
+155,suzigan-@hotmail.com,19/09/2025 17:39,Aberto,Confirmado,Entregue,BRL,195.5,7.82,81.83,269.51,Leandro Jose Suzigan,7286920669,(53) 50000-0000,Leandro Jose Suzigan,(53) 50000-0000,Rua adalto Pereira de Almeida,45,,Alvorada,Araporã,38465000,Minas Gerais,Brasil,Loggi via SmartEnvios,PagarMe,,Entrega em zona rural,,19/09/2025,30/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),195.5,1,170-FREIJO-UN,Mobile,SM4746906680ZUJ,ch_OypG12JfZfx1VY7w,1792044245,Sim,,,,,
+153,ellen.fernanda06@gmail.com,18/09/2025 15:33,Aberto,Confirmado,Enviado,BRL,218.8,29.76,77.13,266.17,Ellen Fernanda Rossetti Borges,11582760950,(54) 80000-0000,Ellen Fernanda Rossetti Borges,(54) 80000-0000,Rua Nove de Março,317,edificio le pont,Centro,Joinville,89201400,Santa Catarina,Brasil,JadLog via SmartEnvios,PagarMe,BEMVINDO10,,Cliente solicitou embalagem especial,,18/09/2025,19/09/2025,Aparador e Buffet Triplo Multiuso (Freijó),218.8,1,310-FREIJO-PRETO-UN,Loja virtual,SM6228855218I38,ch_8ogVg9Zfzt0E5QDv,1791323029,Sim,,,,,
+147,demarchi@aasp.org.br,17/09/2025 01:03,Aberto,Confirmado,Entregue,BRL,195.5,0.00,35.28,230.78,Florence elizabeth Demarchi,14414683823,(51) 40000-0000,Florence elizabeth Demarchi,(51) 40000-0000,Rua Maria Cândida,606,APTO 24 OU ZELADOR,Vila Guilherme,São Paulo,2071001,São Paulo,Brasil,JadLog via SmartEnvios,PagarMe,,Entrega em prédio comercial,,17/09/2025,19/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),195.5,1,170-FREIJO-UN,Loja virtual,SM6046836534I38,ch_ay89QD6Tr2FpAPgK,1790319654,Sim,,,,,
+145,panttilatonani@yahoo.com.br,16/09/2025 12:40,Aberto,Confirmado,Enviado,BRL,195.5,0.00,100.93,296.43,Panttila dos Santos Tonani,11376571706,(52) 98500-0000,Panttila dos Santos Tonani,(52) 98500-0000,Rua Alfredo Félix,627,,Itaputanga,Piúma,29285000,Espírito Santo,Brasil,Nuvem Envio Correios PAC,PagarMe,,Cliente mora em local de difícil acesso,,16/09/2025,16/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),195.5,1,170-FREIJO-UN,Mobile,SM5310238552I38,ch_9AMYQpAfXjtLV6zr,1789846258,Sim,,,,,
+144,elaine.portuguesa@gmail.com,15/09/2025 19:28,Aberto,Confirmado,Entregue,BRL,195.5,19.55,35.28,211.23,Elaine Prates,16036973810,(51) 20000-0000,Elaine Prates,(51) 20000-0000,Avenida Tiradentes,3071,,Jardim Bom Clima,Guarulhos,7196000,São Paulo,Brasil,JadLog via SmartEnvios,PagarMe,BEMVINDO10,,Cliente solicitou entrega rápida,,15/09/2025,19/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),195.5,1,170-FREIJO-UN,Mobile,SM0924358814I38,ch_QDKzjGXFnkHqRgd8,1789360940,Sim,,,,,
+143,alessandra.hansen@hotmail.com,15/09/2025 13:53,Aberto,Confirmado,Entregue,BRL,178.8,0.00,32.76,211.56,Alessandra Aparecida Hansen D'Agostini,13929960826,(51) 99999-9999,Alessandra Aparecida Hansen D'Agostini,(51) 99999-9999,Rua dos Abacateiros,27,,Residencial Vale das Nogueiras,Americana,13474372,São Paulo,Brasil,JadLog via SmartEnvios,PagarMe,,Entrega em condomínio fechado,,15/09/2025,19/09/2025,Aparador e Buffet Roma (Freijó),178.8,1,350-FREIJOCOMBORDAPRETA-UN,Mobile,SM9961843315I38,ch_GXRpODOsVRFemz8b,1789094090,Sim,,,,,
+142,rnogueira20@gmail.com,15/09/2025 13:49,Aberto,Confirmado,Enviado,BRL,195.5,0.00,36.11,231.61,Renato Nogueira Souza,10940110709,(52) 19899-9999,Renato Nogueira Souza,(52) 19899-9999,Avenida Jaime Poggi,99,Bloco 5 1611,Barra Olímpica,Rio de Janeiro,22775130,Rio de Janeiro,Brasil,JadLog via SmartEnvios,PagarMe,,Cliente trabalha em home office,,15/09/2025,16/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Preto),195.5,1,170-PRETO-UN,Mobile,SM9462130770I38,ch_8lxdWr9sMULvo9Lg,1789090211,Sim,,,,,
+141,alelacavalino@hotmail.com,15/09/2025 06:29,Aberto,Confirmado,Enviado,BRL,195.5,0.00,32.17,227.67,Alessandra Lacava,24728636836,(51) 19899-9999,Alessandra Lacava,(51) 19899-9999,Rua Doutor João Batista Vasques,55,,Vila Sorocabana,Guarulhos,7024210,São Paulo,Brasil,JadLog via SmartEnvios,PagarMe,,Entrega preferencial pela manhã,,15/09/2025,16/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Gianduia),195.5,1,170-GIANDUIA-UN,Mobile,SM3765186547I38,ch_JVKnmVbi5CY30Pqj,1788177535,Sim,,,,,
+140,onemarmouradasilva@gmail.com,15/09/2025 00:15,Aberto,Confirmado,Enviado,BRL,157.9,15.79,44.75,186.86,Onemar Moura,28759085886,(51) 19999-9999,Onemar Moura,(51) 19999-9999,Rua Sílvio Barbini,251,Apto 52B,Conjunto Residencial José Bonifácio,São Paulo,8250650,São Paulo,Brasil,Loggi via SmartEnvios,PagarMe,BEMVINDO10,,Cliente solicitou entrega discreta,,15/09/2025,16/09/2025,Mesa e Escrivaninha Multiuso Estilo Industrial (Freijó),157.9,1,180-FREIJO-UN,Mobile,SM3746128700I38,ch_7B3MJwHl0IBQoqej,1788791346,Sim,,,,,
+139,vanessaamacedo@hotmail.com,14/09/2025 20:26,Aberto,Confirmado,Enviado,BRL,195.5,19.55,35.28,211.23,Vanessa Macedo,30844850896,(51) 19999-9999,Vanessa Macedo,(51) 19999-9999,Avenida Parkinson,42,Apto 26,Alphaville Empresarial,Barueri,6465136,São Paulo,Brasil,JadLog via SmartEnvios,PagarMe,BEMVINDO10,,Cliente solicitou entrega em empresa,,14/09/2025,16/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),195.5,1,170-FREIJO-UN,Mobile,SM3904164367I38,ch_koBa6KRSpqC9kbjX,1788593700,Sim,,,,,
+138,wagner.carrascosa@ymail.com,14/09/2025 18:56,Aberto,Confirmado,Enviado,BRL,195.5,0.00,35.28,230.78,Wagner Carrascosa,6892879845,(51) 19699-9999,Wagner Carrascosa,(51) 19699-9999,Avenida Tenente Haraldo Egídio de Souza Santos,732,,Jardim Chapadão,Campinas,13070160,São Paulo,Brasil,JadLog via SmartEnvios,PagarMe,,Entrega em casa,,14/09/2025,16/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),195.5,1,170-FREIJO-UN,Mobile,SM8911132643I38,ch_PGen7LQtnI4oY1AJ,1788580123,Sim,,,,,
+137,admaracampos@yahoo.com.br,13/09/2025 20:29,Aberto,Confirmado,Enviado,BRL,81.8,8.18,21.04,94.66,Admara Campos,20267154836,(51) 29999-9999,Admara Campos,(51) 29999-9999,Rua dos Alecrins,107,Casa amarela,Jardim das Indústrias,São José dos Campos,12240030,São Paulo,Brasil,JadLog via SmartEnvios,PagarMe,BEMVINDO10,,Cliente solicitou entrega rápida,,13/09/2025,16/09/2025,Mesa de Centro Retangular Grande (Off-White Freijó),81.8,1,410-OFFWHITE-FREIJO-UN,Mobile,SM0534490775I38,ch_k1wNDeTAmc553bpd,1788017120,Sim,,,,,
+136,lab.ambiental@acslab.com.br,11/09/2025 13:51,Aberto,Confirmado,Enviado,BRL,195.5,0.00,52.63,248.13,Acs Laboratórios Divisão Agroambiental,2,20819E+12,(56) 23111-0000,Acs Laboratórios DIVISÃO AGROAMBIENTAL,(56) 23111-0000,Avenida T 15,1438,Qd 152 Lt 08,Setor Bueno,Goiânia,74230010,Goiás,Brasil,JadLog via SmartEnvios,PagarMe,,Entrega em empresa,,12/09/2025,16/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),195.5,1,170-FREIJO-UN,Loja virtual,SM0534840835I38,ch_l2xwj7Ws6qTW7Jvm,1786596211,Sim,,,,,
+135,mimi404172@gmail.com,09/09/2025 08:11,Aberto,Confirmado,Entregue,BRL,195.5,19.55,51.37,227.32,Miriam Moraes,1246531704,(52) 20000-0000,Miriam Moraes,(52) 20000-0000,Alameda das Laranjeiras,14,Casa ao lado do Bar da Tamires,Chácara Santo Antônio,Belford Roxo,26172140,Rio de Janeiro,Brasil,JadLog via SmartEnvios,PagarMe,BEMVINDO10,,Cliente mora em local de difícil acesso,,09/09/2025,16/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),195.5,1,170-FREIJO-UN,Mobile,SM4566570693I38,ch_9GDBydZURUj0K4Zl,1784999488,Sim,,,,,
+134,marcos.brandolt@hotmail.com,08/09/2025 22:11,Aberto,Confirmado,Entregue,BRL,195.5,0.00,39.14,234.64,Marcos Brandolt,73533181049,(51) 19999-9999,Marcos Brandolt,(51) 19999-9999,Rua Henrique Bazanelli,227,,Jardim dos Ipês,Itu,13309870,São Paulo,Brasil,JadLog via SmartEnvios,PagarMe,,Entrega em casa,,08/09/2025,12/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),195.5,1,170-FREIJO-UN,Loja virtual,SM5547595609I38,ch_qOByxB8SYqFenbPV,1784848877,Sim,,,,,
+133,gleice@uenf.br,08/09/2025 10:47,Aberto,Confirmado,Enviado,BRL,319.9,31.99,91.09,379,Gleice G Ponte Silva,1744185743,(52) 29899-9999,Gleice G Ponte Silva,(52) 29899-9999,Rua Domingos Viana,565,sobrado,Parque Turf Club,Campos dos Goytacazes,28013085,Rio de Janeiro,Brasil,Buslog via SmartEnvios,PagarMe,BEMVINDO10,,Cliente solicitou entrega urgente,,08/09/2025,09/09/2025,Mesa de Jantar Dobrável Industrial 6 Lugares - Praticidade e Estilo em Qualquer Ambiente (Freijó),319.9,1,700-FREIJO-PRETO-UN,Loja virtual,SM7703241595I38,ch_gy0ov7MfJfOX92OM,1784378255,Sim,,,,,
+132,tatianalentz@hotmail.com,08/09/2025 10:19,Aberto,Confirmado,Enviado,BRL,170.5,0.00,84.04,254.54,Tatiana Lentz,91945623004,(55) 19899-9999,Tatiana Lentz,(55) 19899-9999,Rua Caxias do Sul,700,,Praia da Cal,Torres,95560000,Rio Grande do Sul,Brasil,Loggi via SmartEnvios,PagarMe,,Entrega em apartamento,,08/09/2025,09/09/2025,Aparador e Buffet Roma Cobre (Off-White),170.5,1,351-OFFWHITE-OFFWHITE-UN,Mobile,SM2945787821I38,ch_YA2yk4Vi7igKJL8G,1784357214,Sim,,,,,
+131,cissaromariz@gmail.com,05/09/2025 18:27,Aberto,Confirmado,Entregue,BRL,479.2,0.00,112.14,591.34,Cecilia Romariz Batista Romariz,25621882091,(55) 39899-9999,Cecilia Romariz Batista Romariz,(55) 39899-9999,Avenida Bagé,1292,Apto 501,Petrópolis,Porto Alegre,90460080,Rio Grande do Sul,Brasil,JadLog via SmartEnvios,PagarMe,,Cliente solicitou entrega especial,,05/09/2025,17/09/2025,Banqueta e Puff Retrátil Classic (Areia),74,2,111-AREIA-UN,Mobile,SM8009786141I38,ch_dNmGYzPTMTJgRD1a,1782792459,Sim,,,,,
+130,janiogalego@hotmail.com,04/09/2025 23:04,Aberto,Confirmado,Enviado,BRL,499.4,49.94,77.97,527.43,Janio Oliveira,1731667175,(54) 80000-0000,Janio Oliveira,(54) 80000-0000,Rua Doutor Pedrinho,27,Casa 01,Itoupava Central,Blumenau,89062213,Santa Catarina,Brasil,Buslog via SmartEnvios,PagarMe,BEMVINDO10,,Cliente solicitou montagem,,04/09/2025,05/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),171.9,1,170-FREIJO-UN,Mobile,SM6385048459I38,ch_RpkP3WOFB2iqPGb1,1781517906,Sim,,,,,
+129,miguel@faret.adv.br,03/09/2025 22:33,Aberto,Confirmado,Entregue,BRL,140.9,14.09,35.23,162.04,Miguel Faret Neto,2,89492E+13,(54) 20000-0000,Miguel Faret Neto,(54) 20000-0000,Rua Doutor Heitor Valente,358,,Tarumã,Curitiba,82800050,Paraná,Brasil,JadLog via SmartEnvios,PagarMe,BEMVINDO10,,Cliente trabalha como advogado,,03/09/2025,09/09/2025,Mesa e Escrivaninha Multiuso Estilo Industrial (Freijó),140.9,1,180-FREIJO-UN,Mobile,SM1734110638I38,ch_jeJ3ALnFxF1ORZW7,1781619727,Sim,,,,,
+128,isaac.dacruzaguiar@gmail.com,03/09/2025 12:34,Aberto,Confirmado,Entregue,BRL,171.9,0.00,59.35,231.25,Isaac aguiar,70008280134,(56) 20000-0000,Isaac aguiar,(56) 20000-0000,CNB 1 Lote 14,SN,Apt 805 Edf don juan,Taguatinga Norte (Taguatinga),Brasília,72115909,Distrito Federal,Brasil,JadLog via SmartEnvios,PagarMe,,Entrega em apartamento,,03/09/2025,09/09/2025,Mesa e Escrivaninha Dobrável com Pés em Aço (Freijó),171.9,1,170-FREIJO-UN,Mobile,SM7845032662I38,ch_7dvjG5wT2T0z2DBZ,1781219982,Sim,,,,,
+127,eop.brasil@gmail.com,03/09/2025 12:02,Aberto,Confirmado,Entregue,BRL,145.5,0.00,43.14,188.64,Elienay Oliveira,84863021372,(58) 60000-0000,Elienay Oliveira,(58) 60000-0000,Rua Antônia de Andrade Mendes,430,Ap 1401 bocol 01,Palmeiras,Belo Horizonte,31710300,Minas Gerais,Brasil,JadLog via SmartEnvios,PagarMe,,Entrega em apartamento,,03/09/2025,11/09/2025,Mesa e Escrivaninha Multiuso Master 90x60cm (Freijó),145.5,1,185-FREIJO-UN,Mobile,SM7374282754I38,ch_q05rMq2hWhemy1Eo,1781190694,Sim,,,,,`
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
     link.setAttribute('href', url);
-    link.setAttribute('download', `modelo_importacao_pedidos_v2.0_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `modelo_importacao_nuvemshop_v3.0_${new Date().toISOString().split('T')[0]}.csv`);
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
@@ -483,36 +871,69 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
 
     setCsvLoading(true);
     try {
-      const text = await file.text();
-      const rows = text.split('\n').filter(row => row.trim());
-      if (rows.length < 2) {
-        toast.error("Arquivo deve conter pelo menos um cabeçalho e uma linha de dados.");
-        return;
-      }
+      let headers: string[] = [];
+      let dataRows: string[][] = [];
 
-      // Parse CSV básico
-      const parsedRows: string[][] = rows.map(row => {
-        const result = [];
-        let current = '';
-        let inQuotes = false;
+      // Detectar tipo de arquivo
+      const fileExtension = file.name.split('.').pop()?.toLowerCase();
 
-        for (let i = 0; i < row.length; i++) {
-          const char = row[i];
-          if (char === '"') {
-            inQuotes = !inQuotes;
-          } else if (char === ',' && !inQuotes) {
-            result.push(current.trim());
-            current = '';
-          } else {
-            current += char;
-          }
+      if (fileExtension === 'xlsx' || fileExtension === 'xls') {
+        // Processar arquivo Excel
+        const arrayBuffer = await file.arrayBuffer();
+        const XLSX = await import('xlsx');
+        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+
+        // Usar a primeira planilha
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+
+        // Converter para array de arrays
+        const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' }) as string[][];
+
+        if (jsonData.length < 2) {
+          toast.error("Arquivo Excel deve conter pelo menos um cabeçalho e uma linha de dados.");
+          return;
         }
-        result.push(current.trim());
-        return result;
-      });
 
-      const headers = parsedRows[0];
-      const dataRows = parsedRows.slice(1).filter(row => row.some(cell => cell.trim()));
+        headers = jsonData[0].map(h => String(h || '').trim());
+        dataRows = jsonData.slice(1).map(row => row.map(cell => String(cell || '').trim())).filter(row => row.some(cell => cell));
+
+        toast.success(`Arquivo Excel processado: ${dataRows.length} linhas encontradas.`);
+      } else {
+        // Processar arquivo CSV (lógica existente)
+        const text = await file.text();
+        const rows = text.split('\n').filter(row => row.trim());
+        if (rows.length < 2) {
+          toast.error("Arquivo deve conter pelo menos um cabeçalho e uma linha de dados.");
+          return;
+        }
+
+        // Parse CSV básico
+        const parsedRows: string[][] = rows.map(row => {
+          const result = [];
+          let current = '';
+          let inQuotes = false;
+
+          for (let i = 0; i < row.length; i++) {
+            const char = row[i];
+            if (char === '"') {
+              inQuotes = !inQuotes;
+            } else if (char === ',' && !inQuotes) {
+              result.push(current.trim());
+              current = '';
+            } else {
+              current += char;
+            }
+          }
+          result.push(current.trim());
+          return result;
+        });
+
+        headers = parsedRows[0];
+        dataRows = parsedRows.slice(1).filter(row => row.some(cell => cell.trim()));
+
+        toast.success(`Arquivo CSV processado: ${dataRows.length} linhas encontradas.`);
+      }
 
       if (dataRows.length === 0) {
         toast.error("Nenhum dado encontrado no arquivo.");
@@ -530,13 +951,13 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
 
       setCsvHeaders(headers);
       setCsvSampleData(sampleData);
-      setRawCsvData(parsedRows);
+      setRawCsvData([headers, ...dataRows]); // Incluir headers no raw data
       setShowMapping(true);
 
       toast.success(`${dataRows.length} linhas encontradas. Configure o mapeamento dos campos.`);
     } catch (error) {
-      console.error("Error processing CSV:", error);
-      toast.error("Erro ao processar arquivo. Verifique o formato CSV.");
+      console.error("Error processing file:", error);
+      toast.error("Erro ao processar arquivo. Verifique o formato e tente novamente.");
     } finally {
       setCsvLoading(false);
       // Reset file input
@@ -544,158 +965,314 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
     }
   };
 
-  // Função para processar dados CSV com mapeamento aprimorado
-  const processCSVWithMapping = (mapping: Record<string, string>) => {
-    const dataRows = rawCsvData.slice(1).filter(row => row.some(cell => cell.trim()));
-
-    const parsed = dataRows.map((row, index) => {
-      const order: Record<string, string> = {};
-
-      // Aplicar mapeamento
-      csvHeaders.forEach((header, colIndex) => {
-        const systemField = mapping[header];
-        if (systemField) {
-          order[systemField] = row[colIndex]?.trim() || '';
-        }
-      });
-
-      // Processar dados mapeados com todos os campos suportados
-      const trackingCode = order.tracking_code || '';
-      const customerName = order.customer_name || '';
-      const customerEmail = order.customer_email || '';
-      const customerPhone = order.customer_phone || '';
-      const carrierInput = order.carrier || '';
-      const orderValue = order.order_value || '';
-      const destination = order.destination || '';
-      const orderDate = order.order_date || '';
-      const estimatedDelivery = order.estimated_delivery || '';
-      const productName = order.product_name || '';
-      const quantity = order.quantity || '';
-      const orderNumber = order.order_number || '';
-      const notes = order.notes || '';
-
-      // Validações completas
-      const errors: string[] = [];
-      const warnings: string[] = [];
-
-      // Validações obrigatórias
-      if (!trackingCode) errors.push('Código de rastreio é obrigatório');
-      if (!customerName) errors.push('Nome do cliente é obrigatório');
-      if (!customerEmail) errors.push('Email do cliente é obrigatório');
-
-      // Validações de formato
-      if (customerEmail && !validateEmail(customerEmail)) errors.push('Email inválido');
-      if (customerPhone && !validatePhone(customerPhone)) warnings.push('Telefone pode estar em formato incorreto');
-      if (orderValue && !validateCurrency(orderValue)) warnings.push('Valor deve estar no formato correto (ex: 99.90)');
-      if (orderDate && !validateDate(orderDate)) warnings.push('Data do pedido deve estar no formato DD/MM/YYYY');
-      if (estimatedDelivery && !validateDate(estimatedDelivery)) warnings.push('Data de entrega deve estar no formato DD/MM/YYYY');
-      if (quantity && !validateQuantity(quantity)) warnings.push('Quantidade deve ser um número inteiro positivo');
-
-      // Validação de código de rastreio
-      let finalCarrier = carrierInput;
-      if (trackingCode) {
-        const trackingValidation = validateTrackingCode(trackingCode);
-        if (!trackingValidation.isValid) {
-          errors.push(...trackingValidation.errors);
-        } else if (!finalCarrier) {
-          finalCarrier = trackingValidation.carrier;
-        }
-      }
-
-      if (!finalCarrier) {
-        finalCarrier = 'Correios';
-        if (trackingCode) warnings.push('Transportadora não especificada, assumindo Correios');
-      }
-
-      let status: 'valid' | 'invalid' | 'warning' = 'valid';
-      if (errors.length > 0) status = 'invalid';
-      else if (warnings.length > 0) status = 'warning';
-
-      return {
-        tracking_code: trackingCode,
-        customer_name: customerName,
-        customer_email: customerEmail,
-        customer_phone: customerPhone,
-        carrier: finalCarrier,
-        status,
-        errors,
-        warnings,
-        // Campos adicionais do CSV aprimorado
-        order_value: orderValue,
-        destination,
-        order_date: orderDate,
-        estimated_delivery: estimatedDelivery,
-        product_name: productName,
-        quantity,
-        order_number: orderNumber,
-        notes,
+  // Função para detectar duplicados
+  const detectDuplicates = async (orders: ParsedOrder[]): Promise<{
+    duplicates: Array<{
+      tracking_code: string;
+      existing_order: {
+        id: string;
+        tracking_code: string;
+        customer_name: string;
+        customer_email: string;
+        created_at: string;
       };
-    });
+      new_order: ParsedOrder;
+    }>;
+    warnings: string[];
+  }> => {
+    const duplicates: Array<{
+      tracking_code: string;
+      existing_order: {
+        id: string;
+        tracking_code: string;
+        customer_name: string;
+        customer_email: string;
+        created_at: string;
+      };
+      new_order: ParsedOrder;
+    }> = [];
+    const warnings: string[] = [];
 
-    setParsedOrders(parsed);
-    setShowMapping(false);
-    setShowPreview(true);
+    try {
+      // Buscar pedidos existentes pelos códigos de rastreio
+      const trackingCodes = orders.map(order => order.tracking_code).filter(code => code);
+      const uniqueTrackingCodes = [...new Set(trackingCodes)];
 
-    const validCount = parsed.filter(o => o.status === 'valid').length;
-    const warningCount = parsed.filter(o => o.status === 'warning').length;
-    const errorCount = parsed.filter(o => o.status === 'invalid').length;
+      if (uniqueTrackingCodes.length > 0) {
+        const { data: existingOrders, error } = await supabase
+          .from('orders')
+          .select('id, tracking_code, customer_name, customer_email, created_at')
+          .eq('user_id', user?.id)
+          .in('tracking_code', uniqueTrackingCodes);
 
-    toast.success(`${parsed.length} pedidos processados: ${validCount} válidos, ${warningCount} com avisos, ${errorCount} com erros`);
+        if (error) {
+          console.error('Error checking duplicates:', error);
+          warnings.push('Não foi possível verificar duplicatas devido a um erro na consulta');
+          return { duplicates, warnings };
+        }
+
+        // Mapear pedidos existentes por código de rastreio
+        const existingOrdersMap = new Map(
+          existingOrders?.map(order => [order.tracking_code, order]) || []
+        );
+
+        // Verificar duplicatas
+        for (const order of orders) {
+          const existingOrder = existingOrdersMap.get(order.tracking_code);
+          if (existingOrder) {
+            duplicates.push({
+              tracking_code: order.tracking_code,
+              existing_order: {
+                id: existingOrder.id,
+                tracking_code: existingOrder.tracking_code,
+                customer_name: existingOrder.customer_name,
+                customer_email: existingOrder.customer_email,
+                created_at: existingOrder.created_at
+              },
+              new_order: order
+            });
+          }
+        }
+      }
+
+      // Verificar duplicatas dentro do próprio arquivo
+      const trackingCodeCount = new Map<string, number>();
+      for (const order of orders) {
+        const count = trackingCodeCount.get(order.tracking_code) || 0;
+        trackingCodeCount.set(order.tracking_code, count + 1);
+      }
+
+      const internalDuplicates = Array.from(trackingCodeCount.entries())
+        .filter(([code, count]) => count > 1)
+        .map(([code, count]) => `${code} aparece ${count} vezes no arquivo`);
+
+      if (internalDuplicates.length > 0) {
+        warnings.push(`Duplicatas no arquivo: ${internalDuplicates.join(', ')}`);
+      }
+
+    } catch (error) {
+      console.error('Error in duplicate detection:', error);
+      warnings.push('Erro ao verificar duplicatas');
+    }
+
+    return { duplicates, warnings };
   };
+  async function retryWithBackoff(fn, maxRetries = 4, initialDelay = 800) {
+    let attempt = 0;
+    let lastError;
+    let delay = initialDelay;
+    while (attempt < maxRetries) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastError = err;
+        attempt++;
+        if (attempt < maxRetries) {
+          await new Promise(res => setTimeout(res, delay));
+          delay *= 2;
+        }
+      }
+    }
+    throw lastError;
+  }
 
-  // Função para executar a importação após preview
+  // Função de importação em chunks para grandes volumes
   const executeImport = async () => {
-
     setLoading(true);
     setShowPreview(false);
 
     try {
       const validOrders = parsedOrders.filter(order => order.status !== 'invalid');
-      const ordersToInsert = validOrders.map(order => ({
-        user_id: user.id,
-        tracking_code: order.tracking_code,
-        customer_name: order.customer_name,
-        customer_email: order.customer_email,
-        customer_phone: order.customer_phone || null,
-        carrier: order.carrier,
-        status: 'pending' as const,
-        // Campos adicionais do CSV aprimorado
-        order_value: order.order_value ? parseFloat(order.order_value) : null,
-        destination: order.destination || null,
-        order_date: order.order_date ? new Date(order.order_date.split('/').reverse().join('-')).toISOString() : null,
-        estimated_delivery: order.estimated_delivery ? new Date(order.estimated_delivery.split('/').reverse().join('-')).toISOString() : null,
-        product_name: order.product_name || null,
-        quantity: order.quantity ? parseInt(order.quantity) : null,
-        order_number: order.order_number || null,
-        notes: order.notes || null,
-      }));
+      const CHUNK_SIZE = 100;
+      let totalImported = 0;
+      let allInserted: unknown[] = [];
+      let allHistory: unknown[] = [];
 
-      if (ordersToInsert.length === 0) {
+      if (validOrders.length === 0) {
         toast.error("Nenhum pedido válido para importar.");
+        setLoading(false);
         return;
       }
 
-      const { data, error } = await supabase
-        .from("orders")
-        .insert(ordersToInsert)
-        .select();
+      // Inicializar métricas
+      const startTime = new Date();
+      const totalChunks = Math.ceil(validOrders.length / CHUNK_SIZE);
+      const metrics: ImportMetrics = {
+        totalOrders: validOrders.length,
+        processedOrders: 0,
+        successfulImports: 0,
+        failedImports: 0,
+        warningImports: 0,
+        startTime,
+        currentChunk: 0,
+        totalChunks,
+        averageProcessingTime: 0,
+        networkRequests: 0,
+        errors: [],
+        warnings: []
+      };
 
-      if (error) throw error;
+      setImportMetrics(metrics);
+      setShowMetrics(true);
 
-      // Registrar no histórico
-      if (data) {
-        const historyEntries = data.map(order => ({
-          order_id: order.id,
+      let totalProcessingTime = 0;
+      let chunkCount = 0;
+
+      for (let i = 0; i < validOrders.length; i += CHUNK_SIZE) {
+        const chunkStartTime = Date.now();
+        const chunk = validOrders.slice(i, i + CHUNK_SIZE);
+        metrics.currentChunk = Math.floor(i / CHUNK_SIZE) + 1;
+
+        const ordersToInsert = chunk.map(order => ({
           user_id: user.id,
-          new_status: 'pending',
-          notes: 'Pedido importado via CSV'
+          tracking_code: order.tracking_code,
+          customer_name: order.customer_name,
+          customer_email: order.customer_email,
+          customer_phone: order.customer_phone || null,
+          carrier: order.carrier,
+          status: 'pending' as const,
+          // Campos adicionais do CSV aprimorado
+          order_value: order.order_value ? parseFloat(order.order_value) : null,
+          destination: order.destination || null,
+          order_date: order.order_date ? new Date(order.order_date.split('/').reverse().join('-')).toISOString() : null,
+          estimated_delivery: order.estimated_delivery ? new Date(order.estimated_delivery.split('/').reverse().join('-')).toISOString() : null,
+          product_name: order.product_name || null,
+          quantity: order.quantity ? parseInt(order.quantity) : null,
+          order_number: order.order_number || null,
+          notes: order.notes || null,
+          // Campos NuvemShop adicionais
+          cpf_cnpj: order.cpf_cnpj || null,
+          payment_method: order.payment_method || null,
+          payment_status: order.payment_status || null,
+          order_status: order.order_status || null,
+          shipping_status: order.shipping_status || null,
+          subtotal: order.subtotal ? parseFloat(order.subtotal) : null,
+          discount: order.discount ? parseFloat(order.discount) : null,
+          shipping_cost: order.shipping_cost ? parseFloat(order.shipping_cost) : null,
+          product_value: order.product_value ? parseFloat(order.product_value) : null,
+          sku: order.sku || null,
+          channel: order.channel || null,
+          seller: order.seller || null,
+          payment_date: order.payment_date ? new Date(order.payment_date.split('/').reverse().join('-')).toISOString() : null,
+          shipping_date: order.shipping_date ? new Date(order.shipping_date.split('/').reverse().join('-')).toISOString() : null,
+          transaction_id: order.transaction_id || null,
+          physical_product: order.physical_product || null,
+          cancellation_date: order.cancellation_date ? new Date(order.cancellation_date).toISOString() : null,
+          cancellation_reason: order.cancellation_reason || null,
+          // Campos de endereço NuvemShop
+          delivery_address: order.delivery_address || null,
+          delivery_number: order.delivery_number || null,
+          delivery_complement: order.delivery_complement || null,
+          delivery_neighborhood: order.delivery_neighborhood || null,
+          delivery_city: order.delivery_city || null,
+          delivery_state: order.delivery_state || null,
+          delivery_zipcode: order.delivery_zipcode || null,
+          delivery_country: order.delivery_country || null,
         }));
 
-        await supabase.from("order_history").insert(historyEntries);
+        // Retry logic para inserção no Supabase
+        const { data, error } = await retryWithBackoff(
+          async () => {
+            const result = await supabase
+              .from("orders")
+              .insert(ordersToInsert)
+              .select();
+            if (result.error) throw result.error;
+            return result;
+          },
+          4,
+          800
+        );
+
+        const chunkEndTime = Date.now();
+        const chunkProcessingTime = chunkEndTime - chunkStartTime;
+        totalProcessingTime += chunkProcessingTime;
+        chunkCount++;
+
+        metrics.averageProcessingTime = totalProcessingTime / chunkCount;
+        metrics.networkRequests += 1;
+
+        if (data) {
+          allInserted = allInserted.concat(data);
+          totalImported += data.length;
+          metrics.processedOrders += data.length;
+          metrics.successfulImports += data.length;
+
+          // Registrar histórico
+          const historyEntries = data.map(order => ({
+            order_id: order.id,
+            user_id: user.id,
+            new_status: 'pending',
+            notes: 'Pedido importado via CSV'
+          }));
+          allHistory = allHistory.concat(historyEntries);
+
+          await retryWithBackoff(
+            async () => {
+              const result = await supabase.from("order_history").insert(historyEntries);
+              if (result.error) throw result.error;
+              return result;
+            },
+            3,
+            600
+          );
+        } else {
+          // Contabilizar erros
+          metrics.failedImports += chunk.length;
+          metrics.processedOrders += chunk.length;
+
+          // Adicionar erro às métricas
+          const errorEntry = metrics.errors.find(e => e.code === 'INSERT_FAILED');
+          if (errorEntry) {
+            errorEntry.count += chunk.length;
+          } else {
+            metrics.errors.push({
+              code: 'INSERT_FAILED',
+              message: 'Falha ao inserir pedidos no banco de dados',
+              count: chunk.length
+            });
+          }
+        }
+
+        // Atualizar métricas em tempo real
+        setImportMetrics({ ...metrics });
+
+        // Feedback de progresso
+        toast.info(`Chunk ${metrics.currentChunk}/${metrics.totalChunks}: ${chunk.length} pedidos processados...`);
+
+        // Pequeno delay para UI respirar
+        await new Promise(res => setTimeout(res, 100));
       }
 
+      // Calcular métricas finais
+      const endTime = new Date();
+      const totalTime = (endTime.getTime() - startTime.getTime()) / 1000;
+
+      metrics.estimatedEndTime = endTime;
+      metrics.averageProcessingTime = totalProcessingTime / chunkCount;
+
+      // Contabilizar avisos dos pedidos originais
+      metrics.warningImports = parsedOrders.filter(o => o.status === 'warning').length;
+
+      // Adicionar avisos às métricas
+      const warningsByType = parsedOrders
+        .filter(o => o.warnings.length > 0)
+        .flatMap(o => o.warnings)
+        .reduce((acc, warning) => {
+          acc[warning] = (acc[warning] || 0) + 1;
+          return acc;
+        }, {} as Record<string, number>);
+
+      metrics.warnings = Object.entries(warningsByType).map(([message, count]) => ({
+        code: 'VALIDATION_WARNING',
+        message,
+        count
+      }));
+
+      setImportMetrics({ ...metrics });
+
       const result: ImportResult = {
-        success: ordersToInsert.length,
+        success: totalImported,
         errors: parsedOrders.filter(o => o.status === 'invalid').length,
         warnings: parsedOrders.filter(o => o.status === 'warning').length,
         details: parsedOrders.map(order => ({
@@ -709,7 +1286,11 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
       setImportResult(result);
       setShowResults(true);
 
-      toast.success(`${ordersToInsert.length} pedidos importados com sucesso!`);
+      toast.success(`${totalImported} pedidos importados com sucesso em ${totalTime.toFixed(1)}s!`);
+      
+      // Mostrar notificação push se suportada
+      showImportNotification(result, totalTime);
+      
       setParsedOrders([]);
     } catch (error) {
       console.error("Error importing orders:", error);
@@ -717,9 +1298,7 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
     } finally {
       setLoading(false);
     }
-  };
-
-  return (
+  };  return (
     <div className="min-h-screen flex flex-col bg-background">
       <Navbar />
       
@@ -750,9 +1329,9 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
                   <Upload className="h-7 w-7 text-primary" />
                 </div>
                 <div>
-                  <CardTitle className="text-2xl">Importar via CSV</CardTitle>
+                  <CardTitle className="text-2xl">Importar via CSV ou Excel</CardTitle>
                   <CardDescription className="mt-3 text-base">
-                    Carregue um arquivo CSV com múltiplos pedidos de uma vez
+                    Carregue um arquivo CSV ou Excel (.xlsx, .xls) com múltiplos pedidos de uma vez
                   </CardDescription>
                 </div>
               </CardHeader>
@@ -760,7 +1339,7 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
                 <div className="border-2 border-dashed rounded-lg p-8 text-center hover:border-primary transition-smooth">
                   <input
                     type="file"
-                    accept=".csv"
+                    accept=".csv,.xlsx,.xls"
                     onChange={handleFileUpload}
                     className="hidden"
                     id="csv-upload"
@@ -769,9 +1348,9 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
                   <label htmlFor="csv-upload" className="cursor-pointer">
                     <Upload className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
                     <p className="font-medium mb-2">
-                      {csvLoading ? "Importando..." : "Arraste um arquivo CSV aqui"}
+                      {csvLoading ? "Importando..." : "Arraste um arquivo CSV ou Excel aqui"}
                     </p>
-                    <p className="text-sm text-muted-foreground mb-4">ou clique para selecionar</p>
+                    <p className="text-sm text-muted-foreground mb-4">ou clique para selecionar (.csv, .xlsx, .xls)</p>
                     <Button variant="outline" asChild disabled={csvLoading}>
                       <span>{csvLoading ? "Processando..." : "Selecionar Arquivo"}</span>
                     </Button>
@@ -1062,7 +1641,7 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
             <CardHeader className="space-y-5">
               <CardTitle className="text-2xl flex items-center gap-3">
                 <span className="text-3xl">📋</span>
-                Guia Completo de Importação CSV
+                Guia Completo de Importação CSV/Excel
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-10">
@@ -1073,7 +1652,10 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
                   </h4>
                   <div className="bg-blue-50 p-6 rounded-lg border border-blue-200">
                     <p className="text-sm text-blue-800 mb-2">
-                      <strong>Formato:</strong> UTF-8, separador: vírgula (,), aspas duplas para campos com vírgulas
+                      <strong>Formatos suportados:</strong> CSV (UTF-8, separador: vírgula), Excel (.xlsx, .xls)
+                    </p>
+                    <p className="text-sm text-blue-800 mb-2">
+                      <strong>Estrutura:</strong> Primeira linha como cabeçalho, dados a partir da segunda linha
                     </p>
                     <div className="font-mono text-xs bg-white p-2 rounded border">
                       tracking_code*,customer_name*,customer_email*,carrier,customer_phone,order_value,destination,order_date,estimated_delivery,product_name,quantity,order_number,notes
@@ -1087,33 +1669,132 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
                 <div>
                   <h4 className="font-medium mb-4 text-primary text-lg flex items-center gap-2">
                     <span>📊</span>
-                    Campos Suportados
+                    Campos Suportados - Compatível com NuvemShop
                   </h4>
                   <div className="grid md:grid-cols-2 gap-6">
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-2 text-sm">
-                        <span className="w-2 h-2 bg-red-500 rounded-full"></span>
-                        <strong className="text-red-700">Obrigatórios:</strong>
+                    <div className="space-y-4">
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="w-2 h-2 bg-red-500 rounded-full"></span>
+                          <strong className="text-red-700">Obrigatórios:</strong>
+                        </div>
+                        <ul className="text-sm space-y-1 ml-4">
+                          <li><code className="bg-muted px-1 rounded">tracking_code</code> - Código de rastreio</li>
+                          <li><code className="bg-muted px-1 rounded">customer_name</code> - Nome do cliente</li>
+                          <li><code className="bg-muted px-1 rounded">customer_email</code> - Email do cliente</li>
+                        </ul>
                       </div>
-                      <ul className="text-sm space-y-1 ml-4">
-                        <li><code className="bg-muted px-1 rounded">tracking_code</code> - Código de rastreio</li>
-                        <li><code className="bg-muted px-1 rounded">customer_name</code> - Nome do cliente</li>
-                        <li><code className="bg-muted px-1 rounded">customer_email</code> - Email do cliente</li>
-                      </ul>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="w-2 h-2 bg-blue-500 rounded-full"></span>
+                          <strong className="text-blue-700">Cliente & Contato:</strong>
+                        </div>
+                        <ul className="text-sm space-y-1 ml-4">
+                          <li><code className="bg-muted px-1 rounded">customer_phone</code> - Telefone/WhatsApp</li>
+                          <li><code className="bg-muted px-1 rounded">cpf_cnpj</code> - CPF/CNPJ (válida automaticamente)</li>
+                        </ul>
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="w-2 h-2 bg-green-500 rounded-full"></span>
+                          <strong className="text-green-700">Pedido & Valores:</strong>
+                        </div>
+                        <ul className="text-sm space-y-1 ml-4">
+                          <li><code className="bg-muted px-1 rounded">order_number</code> - Número do pedido</li>
+                          <li><code className="bg-muted px-1 rounded">order_value</code> - Valor total</li>
+                          <li><code className="bg-muted px-1 rounded">subtotal</code> - Subtotal</li>
+                          <li><code className="bg-muted px-1 rounded">discount</code> - Desconto</li>
+                          <li><code className="bg-muted px-1 rounded">shipping_cost</code> - Valor do frete</li>
+                        </ul>
+                      </div>
                     </div>
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-2 text-sm">
-                        <span className="w-2 h-2 bg-green-500 rounded-full"></span>
-                        <strong className="text-green-700">Opcionais:</strong>
+
+                    <div className="space-y-4">
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="w-2 h-2 bg-purple-500 rounded-full"></span>
+                          <strong className="text-purple-700">Produto & Quantidade:</strong>
+                        </div>
+                        <ul className="text-sm space-y-1 ml-4">
+                          <li><code className="bg-muted px-1 rounded">product_name</code> - Nome do produto</li>
+                          <li><code className="bg-muted px-1 rounded">product_value</code> - Valor unitário</li>
+                          <li><code className="bg-muted px-1 rounded">quantity</code> - Quantidade</li>
+                          <li><code className="bg-muted px-1 rounded">sku</code> - SKU do produto</li>
+                          <li><code className="bg-muted px-1 rounded">physical_product</code> - Produto físico (Sim/Não)</li>
+                        </ul>
                       </div>
-                      <ul className="text-sm space-y-1 ml-4">
-                        <li><code className="bg-muted px-1 rounded">carrier</code> - Transportadora</li>
-                        <li><code className="bg-muted px-1 rounded">customer_phone</code> - Telefone</li>
-                        <li><code className="bg-muted px-1 rounded">order_value</code> - Valor (99.90)</li>
-                        <li><code className="bg-muted px-1 rounded">destination</code> - Destino</li>
-                        <li><code className="bg-muted px-1 rounded">product_name</code> - Nome do produto</li>
-                        <li><code className="bg-muted px-1 rounded">quantity</code> - Quantidade</li>
-                      </ul>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="w-2 h-2 bg-orange-500 rounded-full"></span>
+                          <strong className="text-orange-700">Envio & Logística:</strong>
+                        </div>
+                        <ul className="text-sm space-y-1 ml-4">
+                          <li><code className="bg-muted px-1 rounded">carrier</code> - Transportadora</li>
+                          <li><code className="bg-muted px-1 rounded">order_status</code> - Status do pedido</li>
+                          <li><code className="bg-muted px-1 rounded">shipping_status</code> - Status do envio</li>
+                          <li><code className="bg-muted px-1 rounded">channel</code> - Canal de venda</li>
+                          <li><code className="bg-muted px-1 rounded">seller</code> - Vendedor</li>
+                        </ul>
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="w-2 h-2 bg-teal-500 rounded-full"></span>
+                          <strong className="text-teal-700">Endereço Completo:</strong>
+                        </div>
+                        <ul className="text-sm space-y-1 ml-4">
+                          <li><code className="bg-muted px-1 rounded">delivery_address</code> - Endereço</li>
+                          <li><code className="bg-muted px-1 rounded">delivery_number</code> - Número</li>
+                          <li><code className="bg-muted px-1 rounded">delivery_complement</code> - Complemento</li>
+                          <li><code className="bg-muted px-1 rounded">delivery_neighborhood</code> - Bairro</li>
+                          <li><code className="bg-muted px-1 rounded">delivery_city</code> - Cidade</li>
+                          <li><code className="bg-muted px-1 rounded">delivery_state</code> - Estado (UF)</li>
+                          <li><code className="bg-muted px-1 rounded">delivery_zipcode</code> - CEP</li>
+                          <li><code className="bg-muted px-1 rounded">delivery_country</code> - País</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                    <h5 className="font-medium text-blue-800 mb-2">🔄 Mapeamento Automático NuvemShop</h5>
+                    <p className="text-sm text-blue-700 mb-3">
+                      O sistema reconhece automaticamente os nomes dos campos da NuvemShop:
+                    </p>
+                    <div className="grid md:grid-cols-2 gap-4 text-sm">
+                      <div>
+                        <strong className="text-blue-800">Campos NuvemShop → Sistema:</strong>
+                        <ul className="mt-1 space-y-1 text-blue-600">
+                          <li>"Código de rastreio do envio" → tracking_code</li>
+                          <li>"Nome do comprador" → customer_name</li>
+                          <li>"Nome para a entrega" → customer_name</li>
+                          <li>"CPF / CNPJ" → cpf_cnpj</li>
+                          <li>"Telefone para a entrega" → customer_phone</li>
+                          <li>"Forma de Entrega" → carrier</li>
+                          <li>"Total" → order_value</li>
+                          <li>"Endereço" → delivery_address</li>
+                          <li>"Número" → delivery_number</li>
+                          <li>"Cidade" → delivery_city</li>
+                          <li>"Estado" → delivery_state</li>
+                          <li>"Código postal" → delivery_zipcode</li>
+                        </ul>
+                      </div>
+                      <div>
+                        <strong className="text-blue-800">Validações Especiais:</strong>
+                        <ul className="mt-1 space-y-1 text-blue-600">
+                          <li>✅ CPF/CNPJ brasileiro válido</li>
+                          <li>✅ CEP com 8 dígitos</li>
+                          <li>✅ Estados brasileiros (UF)</li>
+                          <li>✅ Endereços completos</li>
+                          <li>✅ Transportadoras por código</li>
+                          <li>✅ Formatos de data/hora</li>
+                          <li>✅ Valores monetários</li>
+                          <li>✅ Emails válidos</li>
+                        </ul>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1247,6 +1928,19 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
           {/* Import History - Componente Real com Rollback */}
           <ImportHistory />
 
+          {/* Import Metrics Dashboard */}
+          {showMetrics && (
+            <ImportMetricsDashboard
+              metrics={importMetrics}
+              isImporting={loading}
+              onExportReport={() => {
+                // TODO: Implementar exportação de relatório
+                toast.info("Funcionalidade de exportação será implementada em breve");
+              }}
+              onViewDetails={() => setShowResults(true)}
+            />
+          )}
+
           {/* Preview Modal */}
           <Dialog open={showPreview} onOpenChange={setShowPreview}>
             <DialogContent className="max-w-6xl max-h-[80vh] overflow-y-auto">
@@ -1297,6 +1991,89 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
                     <div className="text-sm text-blue-700 font-medium">Total</div>
                     <div className="text-xs text-blue-600 mt-1">
                       Pedidos processados
+                    </div>
+                  </div>
+                </div>
+
+                {/* Field Mapping Summary */}
+                <div className="bg-muted/30 p-4 rounded-lg">
+                  <h4 className="font-medium mb-3 text-muted-foreground flex items-center gap-2">
+                    <Package className="w-4 h-4" />
+                    Mapeamento de Campos Detectado
+                  </h4>
+                  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle className="w-4 h-4 text-green-600" />
+                        <span className="font-medium">Campos Obrigatórios:</span>
+                      </div>
+                      <div className="ml-6 space-y-1">
+                        <div className="flex justify-between">
+                          <span>Código de Rastreio</span>
+                          <Badge variant="secondary" className="text-xs">
+                            {parsedOrders.filter(o => o.tracking_code).length}/{parsedOrders.length}
+                          </Badge>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>Nome do Cliente</span>
+                          <Badge variant="secondary" className="text-xs">
+                            {parsedOrders.filter(o => o.customer_name).length}/{parsedOrders.length}
+                          </Badge>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>Email do Cliente</span>
+                          <Badge variant="secondary" className="text-xs">
+                            {parsedOrders.filter(o => o.customer_email).length}/{parsedOrders.length}
+                          </Badge>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle className="w-4 h-4 text-blue-600" />
+                        <span className="font-medium">Campos Opcionais:</span>
+                      </div>
+                      <div className="ml-6 space-y-1">
+                        <div className="flex justify-between">
+                          <span>Telefone</span>
+                          <Badge variant="outline" className="text-xs">
+                            {parsedOrders.filter(o => o.customer_phone).length}/{parsedOrders.length}
+                          </Badge>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>Valor do Pedido</span>
+                          <Badge variant="outline" className="text-xs">
+                            {parsedOrders.filter(o => o.order_value).length}/{parsedOrders.length}
+                          </Badge>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>Produto</span>
+                          <Badge variant="outline" className="text-xs">
+                            {parsedOrders.filter(o => o.product_name).length}/{parsedOrders.length}
+                          </Badge>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle className="w-4 h-4 text-purple-600" />
+                        <span className="font-medium">Transportadoras:</span>
+                      </div>
+                      <div className="ml-6 space-y-1">
+                        {Array.from(new Set(parsedOrders.map(o => o.carrier).filter(c => c))).slice(0, 3).map(carrier => (
+                          <div key={carrier} className="flex justify-between">
+                            <span className="truncate mr-2">{carrier}</span>
+                            <Badge variant="secondary" className="text-xs">
+                              {parsedOrders.filter(o => o.carrier === carrier).length}
+                            </Badge>
+                          </div>
+                        ))}
+                        {Array.from(new Set(parsedOrders.map(o => o.carrier).filter(c => c))).length > 3 && (
+                          <div className="text-xs text-muted-foreground">
+                            +{Array.from(new Set(parsedOrders.map(o => o.carrier).filter(c => c))).length - 3} outras
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1355,13 +2132,16 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
                         <TableHead className="w-16">Status</TableHead>
                         <TableHead>Código de Rastreio</TableHead>
                         <TableHead>Cliente</TableHead>
+                        <TableHead>CPF/CNPJ</TableHead>
                         <TableHead>E-mail</TableHead>
                         <TableHead>Telefone</TableHead>
                         <TableHead>Transportadora</TableHead>
-                        <TableHead>Valor</TableHead>
-                        <TableHead>Destino</TableHead>
+                        <TableHead>Valor Total</TableHead>
                         <TableHead>Produto</TableHead>
                         <TableHead>Qtde</TableHead>
+                        <TableHead>Status Pedido</TableHead>
+                        <TableHead>Status Envio</TableHead>
+                        <TableHead>Cidade</TableHead>
                         <TableHead>N° Pedido</TableHead>
                         <TableHead className="w-32">Problemas</TableHead>
                       </TableRow>
@@ -1388,11 +2168,22 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
                               {order.tracking_code || '-'}
                             </div>
                           </TableCell>
-                          <TableCell className="font-medium">
-                            {order.customer_name || '-'}
+                          <TableCell className="font-medium max-w-32">
+                            <div className="truncate" title={order.customer_name}>
+                              {order.customer_name || '-'}
+                            </div>
                           </TableCell>
-                          <TableCell className="text-sm">
-                            {order.customer_email || '-'}
+                          <TableCell className="text-sm font-mono">
+                            {order.cpf_cnpj ? (
+                              <span className={order.cpf_cnpj.replace(/\D/g, '').length === 11 ? 'text-blue-600' : 'text-purple-600'}>
+                                {order.cpf_cnpj.replace(/\D/g, '').length === 11 ? 'CPF' : 'CNPJ'}: {order.cpf_cnpj}
+                              </span>
+                            ) : '-'}
+                          </TableCell>
+                          <TableCell className="text-sm max-w-40">
+                            <div className="truncate" title={order.customer_email}>
+                              {order.customer_email || '-'}
+                            </div>
                           </TableCell>
                           <TableCell className="text-sm">
                             {order.customer_phone || '-'}
@@ -1402,21 +2193,31 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
                               {order.carrier || 'Não informado'}
                             </Badge>
                           </TableCell>
-                          <TableCell className="text-sm">
+                          <TableCell className="text-sm font-medium">
                             {order.order_value ? `R$ ${order.order_value}` : '-'}
                           </TableCell>
-                          <TableCell className="text-sm max-w-24">
-                            <div className="truncate" title={order.destination}>
-                              {order.destination || '-'}
-                            </div>
-                          </TableCell>
-                          <TableCell className="text-sm max-w-32">
+                          <TableCell className="text-sm max-w-40">
                             <div className="truncate" title={order.product_name}>
                               {order.product_name || '-'}
                             </div>
                           </TableCell>
                           <TableCell className="text-sm text-center">
                             {order.quantity || '-'}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={order.order_status ? "secondary" : "outline"} className="text-xs">
+                              {order.order_status || '-'}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={order.shipping_status ? "secondary" : "outline"} className="text-xs">
+                              {order.shipping_status || '-'}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-sm max-w-24">
+                            <div className="truncate" title={order.delivery_city}>
+                              {order.delivery_city || '-'}
+                            </div>
                           </TableCell>
                           <TableCell className="text-sm font-mono max-w-24">
                             <div className="truncate" title={order.order_number}>
@@ -1523,15 +2324,40 @@ LG234567890BR,"Patricia Oliveira Costa","patricia.oliveira@email.com","Loggi","(
             </DialogContent>
           </Dialog>
 
-          {/* CSV Mapping Modal */}
+          {/* Smart CSV Mapping Modal */}
           <Dialog open={showMapping} onOpenChange={setShowMapping}>
-            <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
-              <CSVMapping
-                csvHeaders={csvHeaders}
-                csvSampleData={csvSampleData}
-                onMappingComplete={processCSVWithMapping}
-                onCancel={() => setShowMapping(false)}
-              />
+            <DialogContent className="max-w-7xl w-[95vw] max-h-[95vh] overflow-hidden flex flex-col">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <FileText className="w-5 h-5" />
+                  Mapeamento Inteligente de Campos CSV
+                </DialogTitle>
+                <DialogDescription>
+                  Configure o mapeamento dos campos do seu arquivo CSV para os campos do sistema.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="flex-1 overflow-y-auto pr-2">
+                <div className="space-y-4 mb-4">
+                  <MappingTemplatesManager
+                    currentMappings={fieldMapping}
+                    csvHeaders={csvHeaders}
+                    onApplyTemplate={(template) => {
+                      setFieldMapping(template.field_mappings);
+                      toast.success(`Template "${template.name}" aplicado!`);
+                    }}
+                    onSaveTemplate={(template) => {
+                      // O componente já salva automaticamente
+                      console.log('Template salvo:', template);
+                    }}
+                  />
+                </div>
+                <SmartCSVMapping
+                  csvHeaders={csvHeaders}
+                  csvSampleData={csvSampleData}
+                  onMappingComplete={processCSVWithMapping}
+                  onCancel={() => setShowMapping(false)}
+                />
+              </div>
             </DialogContent>
           </Dialog>
         </div>

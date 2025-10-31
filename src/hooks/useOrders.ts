@@ -1,8 +1,27 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { MetricsService } from "@/services/metrics";
 import { useEffect } from "react";
+import { useToast } from "@/hooks/use-toast";
+
+// Tipo para atualização de pedido
+type OrderUpdate = {
+  tracking_code?: string;
+  customer_name?: string;
+  customer_email?: string;
+  customer_phone?: string;
+  carrier?: string;
+  status?: string;
+  destination?: string;
+  order_date?: string;
+  estimated_delivery?: string;
+  product_name?: string;
+  quantity?: string;
+  order_number?: string;
+  notes?: string;
+  order_value?: string;
+};
 
 /**
  * Hook para buscar pedidos com caching inteligente
@@ -162,5 +181,96 @@ export const useQuickStats = () => {
     },
     enabled: !!user?.id,
     staleTime: 1 * 60 * 1000,
+  });
+};
+
+/**
+ * Hook para atualizar um pedido
+ */
+export const useUpdateOrder = () => {
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+
+  return useMutation({
+    mutationFn: async ({ orderId, updates }: { orderId: string; updates: Partial<OrderUpdate> }) => {
+      if (!user) throw new Error('User not authenticated');
+
+      const { data, error } = await supabase
+        .from("orders")
+        .update({
+          ...updates,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", orderId)
+        .eq("user_id", user.id)
+        .select()
+        .single();
+
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: () => {
+      // Invalidar queries relacionadas
+      queryClient.invalidateQueries({ queryKey: ['orders'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-metrics'] });
+      queryClient.invalidateQueries({ queryKey: ['quick-stats'] });
+
+      toast({
+        title: "Pedido atualizado",
+        description: "O pedido foi atualizado com sucesso.",
+      });
+    },
+    onError: (error) => {
+      console.error('Erro ao atualizar pedido:', error);
+      toast({
+        title: "Erro ao atualizar",
+        description: "Não foi possível atualizar o pedido. Tente novamente.",
+        variant: "destructive",
+      });
+    },
+  });
+};
+
+/**
+ * Hook para excluir um pedido
+ */
+export const useDeleteOrder = () => {
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+
+  return useMutation({
+    mutationFn: async (orderId: string) => {
+      if (!user) throw new Error('User not authenticated');
+
+      const { error } = await supabase
+        .from("orders")
+        .delete()
+        .eq("id", orderId)
+        .eq("user_id", user.id);
+
+      if (error) throw error;
+      return orderId;
+    },
+    onSuccess: (deletedOrderId) => {
+      // Invalidar queries relacionadas
+      queryClient.invalidateQueries({ queryKey: ['orders'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-metrics'] });
+      queryClient.invalidateQueries({ queryKey: ['quick-stats'] });
+
+      toast({
+        title: "Pedido excluído",
+        description: "O pedido foi removido com sucesso.",
+      });
+    },
+    onError: (error) => {
+      console.error('Erro ao excluir pedido:', error);
+      toast({
+        title: "Erro ao excluir",
+        description: "Não foi possível excluir o pedido. Tente novamente.",
+        variant: "destructive",
+      });
+    },
   });
 };

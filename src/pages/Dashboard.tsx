@@ -29,10 +29,12 @@ import {
   RefreshCw,
   Plus,
   Timer,
-  Wifi
+  Wifi,
+  Edit,
+  Trash2
 } from "lucide-react";
 import { Link } from "react-router-dom";
-import { useOrders } from "@/hooks/useOrders";
+import { useOrders, useUpdateOrder, useDeleteOrder } from "@/hooks/useOrders";
 import { useDashboardMetrics, usePeriods } from "@/hooks/useDashboardMetrics";
 import { useOrderFilters } from "@/hooks/useOrderFilters";
 import { MetricsService } from "@/services/metrics";
@@ -44,6 +46,28 @@ import { useAuth } from "@/contexts/AuthContext";
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, LineChart, Line } from "recharts";
 import jsPDF from 'jspdf';
 import * as XLSX from 'xlsx';
+import OrderEditModal from "@/components/OrderEditModal";
+import OrderDeleteConfirm from "@/components/OrderDeleteConfirm";
+
+// Tipo para pedido
+interface Order {
+  id: string;
+  tracking_code: string;
+  customer_name: string;
+  customer_email: string;
+  customer_phone?: string;
+  carrier: string;
+  status: string;
+  destination?: string;
+  order_date?: string;
+  estimated_delivery?: string;
+  product_name?: string;
+  quantity?: string;
+  order_number?: string;
+  notes?: string;
+  order_value?: string;
+  updated_at: string;
+}
 
 const statusConfig: Record<string, { label: string }> = {
   pending: { label: "Aguardando" },
@@ -65,6 +89,16 @@ const Dashboard = () => {
   // Ativar realtime para orders e metrics
   const { isSubscribed: ordersSubscribed } = useOrdersRealtime(user?.id);
   const { isSubscribed: metricsSubscribed } = useMetricsRealtime(user?.id);
+  
+  // Hooks para editar/excluir pedidos
+  const updateOrderMutation = useUpdateOrder();
+  const deleteOrderMutation = useDeleteOrder();
+  
+  // Estado para modais
+  const [editingOrder, setEditingOrder] = useState<Order | null>(null);
+  const [deletingOrder, setDeletingOrder] = useState<Order | null>(null);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   
   // Hook de filtros avançados
   const {
@@ -207,6 +241,39 @@ const Dashboard = () => {
     }
   };
 
+  // Funções para editar/excluir pedidos
+  const handleEditOrder = (order: Order) => {
+    setEditingOrder(order);
+    setShowEditModal(true);
+  };
+
+  const handleDeleteOrder = (order: Order) => {
+    setDeletingOrder(order);
+    setShowDeleteConfirm(true);
+  };
+
+  const confirmDeleteOrder = async () => {
+    if (!deletingOrder) return;
+
+    try {
+      await deleteOrderMutation.mutateAsync(deletingOrder.id);
+      setShowDeleteConfirm(false);
+      setDeletingOrder(null);
+    } catch (error) {
+      console.error("Erro ao excluir pedido:", error);
+    }
+  };
+
+  const closeEditModal = () => {
+    setShowEditModal(false);
+    setEditingOrder(null);
+  };
+
+  const closeDeleteConfirm = () => {
+    setShowDeleteConfirm(false);
+    setDeletingOrder(null);
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-background">
       <Navbar />
@@ -234,8 +301,19 @@ const Dashboard = () => {
               <select
                 value={selectedPeriod}
                 onChange={(e) => {
-                  const value = e.target.value as keyof ReturnType<typeof MetricsService.getPeriods>;
-                  setSelectedPeriod(value);
+                  const value = e.target.value;
+                  // Só permite valores válidos
+                  if ([
+                    "today",
+                    "yesterday",
+                    "last7Days",
+                    "last30Days",
+                    "thisMonth",
+                    "lastMonth",
+                    "thisYear"
+                  ].includes(value)) {
+                    setSelectedPeriod(value as typeof selectedPeriod);
+                  }
                 }}
                 className="px-4 py-2 rounded-md border bg-background text-sm"
               >
@@ -699,11 +777,26 @@ const Dashboard = () => {
                                   size="sm"
                                   onClick={() => handleUpdateTracking(order.tracking_code)}
                                   disabled={isTracking}
+                                  title="Atualizar rastreamento"
                                 >
                                   <RefreshCw className={`h-4 w-4 ${isTracking ? 'animate-spin' : ''}`} />
                                 </Button>
-                                <Button variant="ghost" size="sm">
-                                  <ArrowUpRight className="h-4 w-4" />
+                                <Button 
+                                  variant="ghost" 
+                                  size="sm"
+                                  onClick={() => handleEditOrder(order)}
+                                  title="Editar pedido"
+                                >
+                                  <Edit className="h-4 w-4" />
+                                </Button>
+                                <Button 
+                                  variant="ghost" 
+                                  size="sm"
+                                  onClick={() => handleDeleteOrder(order)}
+                                  title="Excluir pedido"
+                                  className="text-destructive hover:text-destructive"
+                                >
+                                  <Trash2 className="h-4 w-4" />
                                 </Button>
                               </div>
                             </td>
@@ -716,6 +809,21 @@ const Dashboard = () => {
               )}
             </CardContent>
           </Card>
+
+          {/* Modais de Edição e Exclusão */}
+          <OrderEditModal
+            order={editingOrder}
+            isOpen={showEditModal}
+            onClose={closeEditModal}
+          />
+
+          <OrderDeleteConfirm
+            isOpen={showDeleteConfirm}
+            onClose={closeDeleteConfirm}
+            onConfirm={confirmDeleteOrder}
+            orderTrackingCode={deletingOrder?.tracking_code || ""}
+            isDeleting={deleteOrderMutation.isPending}
+          />
         </div>
       </main>
     </div>
