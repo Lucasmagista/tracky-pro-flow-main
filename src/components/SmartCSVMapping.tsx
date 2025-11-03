@@ -6,7 +6,8 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { CheckCircle, AlertTriangle, XCircle, ArrowRight, RefreshCw, X, Sparkles, Target, Zap, Lightbulb, Shield, TrendingUp } from "lucide-react";
+import { Progress } from "@/components/ui/progress";
+import { CheckCircle, AlertTriangle, XCircle, ArrowRight, RefreshCw, X, Sparkles, Target, Zap, Lightbulb, Shield, TrendingUp, Loader2, Activity } from "lucide-react";
 import { useSmartCSVAnalysis, type DetectedField, type FieldDetectionResult } from "@/hooks/useSmartCSVAnalysis";
 import { useTrackingValidation } from "@/hooks/useTrackingValidation";
 import { useCEPValidation } from "@/hooks/useCEPValidation";
@@ -17,6 +18,7 @@ import { useSeasonalValidation } from "@/hooks/useSeasonalValidation";
 import { useFraudDetection } from "@/hooks/useFraudDetection";
 import { useMLMappingLearning } from "@/hooks/useMLMappingLearning";
 import { useDebounce } from "@/hooks/useDebounce";
+import { useChunkedValidation, type ValidationResult } from "@/hooks/useChunkedValidation";
 
 interface ValidationAlert {
   type: 'error' | 'warning' | 'info' | 'success';
@@ -37,6 +39,8 @@ interface RealTimeValidation {
 interface SmartCSVMappingProps {
   csvHeaders: string[];
   csvSampleData: Record<string, string>[];
+  csvFullData: Record<string, string>[];  // ✅ NOVO: Dados completos para validação
+  dataSize: number;                        // ✅ NOVO: Total de linhas
   onMappingComplete: (mapping: Record<string, string>) => void;
   onCancel: () => void;
 }
@@ -60,6 +64,8 @@ const SYSTEM_FIELDS = [
 const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
   csvHeaders,
   csvSampleData,
+  csvFullData,    // ✅ NOVO: Dados completos
+  dataSize,       // ✅ NOVO: Total de linhas
   onMappingComplete,
   onCancel
 }) => {
@@ -82,6 +88,9 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
   const { analyzeSeasonalPatterns, patterns: seasonalPatterns } = useSeasonalValidation();
   const { analyzeFraudPatterns, patterns: fraudPatterns } = useFraudDetection();
   const { generateMappingSuggestions, learnFromMapping } = useMLMappingLearning();
+  
+  // ✅ NOVO: Hook para validação em chunks
+  const { validateInChunks, progress: chunkProgress, isProcessing: isProcessingChunks } = useChunkedValidation();
 
   // Estado para templates compatíveis
   const [compatibleTemplates, setCompatibleTemplates] = useState<CSVTemplate[]>([]);
@@ -95,6 +104,19 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
 
   // 🔧 FIX 3: Debounce nos mappings para evitar validações excessivas
   const debouncedMappings = useDebounce(mappings, 500);
+
+  // ✅ NOVO: Estados de progresso de validação
+  const [validationProgress, setValidationProgress] = useState({
+    tracking: 0,
+    cep: 0,
+    duplicates: 0,
+    businessRules: 0,
+    fraud: 0,
+    seasonal: 0,
+    overall: 0
+  });
+
+  const [isValidatingComplete, setIsValidatingComplete] = useState(false);
 
   // 🔧 FIX 4: Cleanup completo quando o componente for desmontado
   useEffect(() => {
@@ -214,63 +236,87 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
         return;
       }
 
-      const trackingCodes = csvSampleData.slice(0, 5).map(row => row[trackingMapping.csvColumn] || '').filter(code => code.trim());
-      const carriers = carrierMapping ? csvSampleData.slice(0, 5).map(row => row[carrierMapping.csvColumn] || '') : undefined;
+      // ✅ NOVO: Validar TODOS os códigos de tracking em chunks
+      console.log(`[Validation] Iniciando validação de tracking para ${dataSize} registros`);
+      
+      try {
+        const trackingValidationResult = await validateInChunks({
+          data: csvFullData,
+          chunkSize: 100,
+          validator: async (chunk: Record<string, string>[]) => {
+            const codes = chunk.map(row => row[trackingMapping.csvColumn] || '').filter(c => c.trim());
+            const carriers = carrierMapping ? chunk.map(row => row[carrierMapping.csvColumn] || '') : undefined;
+            
+            if (codes.length === 0) return [];
+            
+            const results = await validateTrackingCodes(codes, carriers);
+            
+            return codes.map((code, idx) => ({
+              id: code,
+              isValid: results[code]?.isValid || false,
+              data: { code, carrier: results[code]?.carrier }
+            }));
+          },
+          onProgress: (current, total, percentage) => {
+            if (isMountedRef.current) {
+              setValidationProgress(prev => ({ ...prev, tracking: percentage }));
+              console.log(`[Validation] Tracking: ${percentage}% (${current}/${total})`);
+            }
+          },
+          signal
+        });
 
-      if (trackingCodes.length > 0) {
-        try {
-          const trackingResults = await validateTrackingCodes(trackingCodes, carriers);
-          
-          // 🔧 CHECK: Verificar após operação assíncrona
-          if (!isMountedRef.current || signal?.aborted) {
-            console.log('[Validation] Cancelado após validação de tracking');
-            return;
-          }
+        // 🔧 CHECK: Verificar após operação assíncrona
+        if (!isMountedRef.current || signal?.aborted) {
+          console.log('[Validation] Cancelado após validação de tracking');
+          return;
+        }
 
-          const validCount = Object.values(trackingResults).filter(r => r.isValid).length;
-          const validRatio = validCount / trackingCodes.length;
+        const validCount = trackingValidationResult.totalValid;
+        const validRatio = validCount / trackingValidationResult.totalProcessed;
 
-          if (validRatio < 0.8) {
+        if (validRatio < 0.8) {
+          alerts.push({
+            type: 'warning',
+            title: 'Códigos de Rastreio Suspeitos',
+            message: `Apenas ${Math.round(validRatio * 100)}% dos códigos (${validCount}/${trackingValidationResult.totalProcessed}) são válidos ou reconhecidos`,
+            field: trackingMapping.csvColumn,
+            suggestion: 'Verifique se os códigos seguem os padrões das transportadoras (Correios, Jadlog, etc.)'
+          });
+        } else {
+          qualityScore += 15;
+          suggestions.push(`✅ ${validCount}/${trackingValidationResult.totalProcessed} códigos de rastreio validados com sucesso`);
+        }
+
+        // Verificar inconsistências entre código e transportadora
+        if (carrierMapping) {
+          const inconsistencies = trackingValidationResult.results.filter(r => {
+            const carrier = r.data?.carrier as string | undefined;
+            return r.isValid && carrier && r.data?.code;
+          }).length;
+
+          if (inconsistencies > 0) {
             alerts.push({
               type: 'warning',
-              title: 'Códigos de Rastreio Suspeitos',
-              message: `Apenas ${Math.round(validRatio * 100)}% dos códigos de rastreio são válidos ou reconhecidos`,
-              field: trackingMapping.csvColumn,
-              suggestion: 'Verifique se os códigos seguem os padrões das transportadoras (Correios, Jadlog, etc.)'
+              title: 'Inconsistência Transportadora vs Código',
+              message: `${inconsistencies} códigos podem não corresponder à transportadora informada`,
+              suggestion: 'Verifique se a transportadora está correta para cada código de rastreio'
             });
-          } else {
-            qualityScore += 15;
-            suggestions.push('✅ Códigos de rastreio validados com sucesso');
           }
+        }
 
-          // Verificar inconsistências entre código e transportadora
-          if (carrierMapping) {
-            const inconsistencies = trackingCodes.filter((code, index) => {
-              const result = trackingResults[code];
-              const carrier = carriers?.[index];
-              return result.isValid && carrier && result.carrier &&
-                     !carrier.toLowerCase().includes(result.carrier.toLowerCase());
-            });
+        console.log(`[Validation] Tracking completo: ${validCount}/${trackingValidationResult.totalProcessed} válidos (${trackingValidationResult.processingTime}ms)`);
 
-            if (inconsistencies.length > 0) {
-              alerts.push({
-                type: 'warning',
-                title: 'Inconsistência Transportadora vs Código',
-                message: `${inconsistencies.length} códigos não correspondem à transportadora informada`,
-                suggestion: 'Verifique se a transportadora está correta para cada código de rastreio'
-              });
-            }
-          }
-        } catch (error) {
-          // Não adicionar erro se foi cancelado
-          if (!signal?.aborted) {
-            alerts.push({
-              type: 'info',
-              title: 'Validação de Rastreio Indisponível',
-              message: 'Não foi possível validar os códigos de rastreio no momento',
-              suggestion: 'A validação será feita durante a importação'
-            });
-          }
+      } catch (error) {
+        // Não adicionar erro se foi cancelado
+        if (!signal?.aborted) {
+          console.error('[Validation] Erro na validação de tracking:', error);
+          alerts.push({
+            type: 'info',
+            title: 'Validação de Rastreio Indisponível',
+            message: 'Não foi possível validar os códigos de rastreio no momento',
+            suggestion: 'A validação será feita durante a importação'
+          });
         }
       }
     }
@@ -283,43 +329,70 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
         return;
       }
 
-      const ceps = csvSampleData.slice(0, 5).map(row => row[cepMapping.csvColumn] || '').filter(cep => cep.trim());
+      // ✅ NOVO: Validar TODOS os CEPs em chunks
+      console.log(`[Validation] Iniciando validação de CEP para ${dataSize} registros`);
+      
+      try {
+        const cepValidationResult = await validateInChunks({
+          data: csvFullData,
+          chunkSize: 50, // CEPs: chunks menores por causa de rate limiting de APIs externas
+          validator: async (chunk: Record<string, string>[]) => {
+            const ceps = chunk.map(row => row[cepMapping.csvColumn] || '').filter(c => c.trim());
+            
+            if (ceps.length === 0) return [];
+            
+            const results = await validateCEPs(ceps);
+            
+            return ceps.map(cep => ({
+              id: cep,
+              isValid: results[cep]?.isValid || false,
+              data: { cep }
+            }));
+          },
+          onProgress: (current, total, percentage) => {
+            if (isMountedRef.current) {
+              setValidationProgress(prev => ({ ...prev, cep: percentage }));
+              console.log(`[Validation] CEP: ${percentage}% (${current}/${total})`);
+            }
+          },
+          signal,
+          delayBetweenChunks: 200 // Maior delay para respeitar rate limit de APIs de CEP
+        });
 
-      if (ceps.length > 0) {
-        try {
-          const cepResults = await validateCEPs(ceps);
-          
-          // 🔧 CHECK: Verificar após operação assíncrona
-          if (!isMountedRef.current || signal?.aborted) {
-            console.log('[Validation] Cancelado após validação de CEP');
-            return;
-          }
+        // 🔧 CHECK: Verificar após operação assíncrona
+        if (!isMountedRef.current || signal?.aborted) {
+          console.log('[Validation] Cancelado após validação de CEP');
+          return;
+        }
 
-          const validCount = Object.values(cepResults).filter(r => r.isValid).length;
-          const validRatio = validCount / ceps.length;
+        const validCount = cepValidationResult.totalValid;
+        const validRatio = validCount / cepValidationResult.totalProcessed;
 
-          if (validRatio < 0.8) {
-            alerts.push({
-              type: 'warning',
-              title: 'CEPs Inválidos Detectados',
-              message: `Apenas ${Math.round(validRatio * 100)}% dos CEPs são válidos`,
-              field: cepMapping.csvColumn,
-              suggestion: 'Verifique se os CEPs estão no formato correto (00000-000)'
-            });
-          } else {
-            qualityScore += 10;
-            suggestions.push('✅ CEPs validados com sucesso');
-          }
-        } catch (error) {
-          // Não adicionar erro se foi cancelado
-          if (!signal?.aborted) {
-            alerts.push({
-              type: 'info',
-              title: 'Validação de CEP Indisponível',
-              message: 'Não foi possível validar os CEPs no momento',
-              suggestion: 'A validação será feita durante a importação'
-            });
-          }
+        if (validRatio < 0.8) {
+          alerts.push({
+            type: 'warning',
+            title: 'CEPs Inválidos Detectados',
+            message: `Apenas ${Math.round(validRatio * 100)}% dos CEPs (${validCount}/${cepValidationResult.totalProcessed}) são válidos`,
+            field: cepMapping.csvColumn,
+            suggestion: 'Verifique se os CEPs estão no formato correto (00000-000)'
+          });
+        } else {
+          qualityScore += 10;
+          suggestions.push(`✅ ${validCount}/${cepValidationResult.totalProcessed} CEPs validados com sucesso`);
+        }
+
+        console.log(`[Validation] CEP completo: ${validCount}/${cepValidationResult.totalProcessed} válidos (${cepValidationResult.processingTime}ms)`);
+
+      } catch (error) {
+        // Não adicionar erro se foi cancelado
+        if (!signal?.aborted) {
+          console.error('[Validation] Erro na validação de CEP:', error);
+          alerts.push({
+            type: 'info',
+            title: 'Validação de CEP Indisponível',
+            message: 'Não foi possível validar os CEPs no momento',
+            suggestion: 'A validação será feita durante a importação'
+          });
         }
       }
     }
@@ -419,49 +492,96 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
         return;
       }
 
-      const sampleOrders = csvSampleData.slice(0, 10).map(row => {
-        const order: Record<string, string> = {};
-        currentMappings.forEach(mapping => {
-          if (mapping.detectedField) {
-            order[mapping.detectedField] = row[mapping.csvColumn] || '';
-          }
-        });
-        return order;
-      });
-
-      const duplicateAnalysis = await detectDuplicates(sampleOrders);
-
-      // 🔧 CHECK: Verificar após operação assíncrona
-      if (!isMountedRef.current || signal?.aborted) {
-        console.log('[Validation] Cancelado após detecção de duplicatas');
-        return;
-      }
-
-      if (duplicateAnalysis.summary.totalDuplicates > 0) {
-        alerts.push({
-          type: duplicateAnalysis.summary.highConfidenceDuplicates > 0 ? 'error' : 'warning',
-          title: 'Duplicatas Detectadas',
-          message: `Encontradas ${duplicateAnalysis.summary.totalDuplicates} possíveis duplicatas (${duplicateAnalysis.summary.highConfidenceDuplicates} de alta confiança)`,
-          suggestion: 'Revise os dados antes de importar para evitar duplicatas no sistema'
+      // ✅ NOVO: Detectar duplicatas em TODO o dataset
+      console.log(`[Validation] Iniciando detecção de duplicatas para ${dataSize} registros`);
+      
+      try {
+        // Preparar todos os dados para análise
+        const allOrders = csvFullData.map(row => {
+          const order: Record<string, string> = {};
+          currentMappings.forEach(mapping => {
+            if (mapping.detectedField) {
+              order[mapping.detectedField] = row[mapping.csvColumn] || '';
+            }
+          });
+          return order;
         });
 
-        // Adicionar detalhes das duplicatas por tipo
-        Object.entries(duplicateAnalysis.summary.byType).forEach(([type, count]) => {
-          const typeNames = {
-            tracking_code: 'códigos de rastreio',
-            email: 'e-mails',
-            order_number: 'números de pedido'
-          };
+        // Processar em chunks para não sobrecarregar
+        const duplicateResult = await validateInChunks({
+          data: allOrders,
+          chunkSize: 200,
+          validator: async (chunk: Record<string, string>[]) => {
+            // Detectar duplicatas dentro do chunk
+            const chunkDuplicates = await detectDuplicates(chunk);
+            
+            return chunk.map((order, idx) => ({
+              id: order.tracking_code || `order-${idx}`,
+              isValid: true,
+              data: { 
+                hasDuplicate: chunkDuplicates.summary.totalDuplicates > 0,
+                duplicateInfo: chunkDuplicates
+              }
+            }));
+          },
+          onProgress: (current, total, percentage) => {
+            if (isMountedRef.current) {
+              setValidationProgress(prev => ({ ...prev, duplicates: percentage }));
+              console.log(`[Validation] Duplicatas: ${percentage}% (${current}/${total})`);
+            }
+          },
+          signal
+        });
+
+        // 🔧 CHECK: Verificar após operação assíncrona
+        if (!isMountedRef.current || signal?.aborted) {
+          console.log('[Validation] Cancelado após detecção de duplicatas');
+          return;
+        }
+
+        // Analisar últimos chunks para estatísticas finais
+        const finalAnalysis = await detectDuplicates(allOrders.slice(-100)); // Últimos 100 registros
+
+        if (finalAnalysis.summary.totalDuplicates > 0) {
+          alerts.push({
+            type: finalAnalysis.summary.highConfidenceDuplicates > 0 ? 'error' : 'warning',
+            title: 'Duplicatas Detectadas no Dataset Completo',
+            message: `Encontradas ${finalAnalysis.summary.totalDuplicates} possíveis duplicatas (${finalAnalysis.summary.highConfidenceDuplicates} de alta confiança)`,
+            suggestion: 'Revise os dados antes de importar para evitar duplicatas no sistema'
+          });
+
+          // Adicionar detalhes das duplicatas por tipo
+          Object.entries(finalAnalysis.summary.byType).forEach(([type, count]) => {
+            const typeNames = {
+              tracking_code: 'códigos de rastreio',
+              email: 'e-mails',
+              order_number: 'números de pedido'
+            };
+            alerts.push({
+              type: 'info',
+              title: `Duplicatas por ${typeNames[type as keyof typeof typeNames]}`,
+              message: `${count} duplicatas encontradas no dataset completo`,
+              suggestion: 'Verifique se estes dados já existem no sistema'
+            });
+          });
+        } else {
+          qualityScore += 15; // Pontos por não ter duplicatas
+          suggestions.push(`✅ Nenhuma duplicata detectada em ${dataSize} registros`);
+        }
+
+        console.log(`[Validation] Duplicatas completo: ${finalAnalysis.summary.totalDuplicates} encontradas (${duplicateResult.processingTime}ms)`);
+
+      } catch (error) {
+        // Não adicionar erro se foi cancelado
+        if (!signal?.aborted) {
+          console.error('[Validation] Erro na detecção de duplicatas:', error);
           alerts.push({
             type: 'info',
-            title: `Duplicatas por ${typeNames[type as keyof typeof typeNames]}`,
-            message: `${count} duplicatas encontradas`,
-            suggestion: 'Verifique se estes dados já existem no sistema'
+            title: 'Detecção de Duplicatas Indisponível',
+            message: 'Não foi possível verificar duplicatas no momento',
+            suggestion: 'A verificação será feita durante a importação'
           });
-        });
-      } else {
-        qualityScore += 15; // Pontos por não ter duplicatas
-        suggestions.push('✅ Nenhuma duplicata detectada nos dados de exemplo');
+        }
       }
     } catch (error) {
       // Não adicionar erro se foi cancelado
@@ -499,7 +619,51 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
           return mappedRow;
         });
 
-        const businessRulesAnalysis = validateBusinessRules(sampleData, businessRules);
+        // ✅ NOVO: Validar business rules em TODO o dataset
+        console.log(`[Validation] Iniciando validação de regras de negócio para ${dataSize} registros`);
+        
+        const allMappedData = csvFullData.map(row => {
+          const mappedRow: Record<string, string | number | boolean | null> = {};
+          currentMappings.forEach(mapping => {
+            if (mapping.detectedField) {
+              const value = row[mapping.csvColumn];
+              if (value === '' || value === undefined) {
+                mappedRow[mapping.detectedField] = null;
+              } else if (!isNaN(Number(value)) && mapping.detectedField.includes('value')) {
+                mappedRow[mapping.detectedField] = Number(value);
+              } else if (value.toLowerCase() === 'true' || value.toLowerCase() === 'false') {
+                mappedRow[mapping.detectedField] = value.toLowerCase() === 'true';
+              } else {
+                mappedRow[mapping.detectedField] = value;
+              }
+            }
+          });
+          return mappedRow;
+        });
+
+        const businessRulesResult = await validateInChunks({
+          data: allMappedData,
+          chunkSize: 150,
+          validator: async (chunk: Record<string, string | number | boolean | null>[]) => {
+            const chunkAnalysis = validateBusinessRules(chunk, businessRules);
+            
+            return chunk.map((row, idx) => ({
+              id: `rule-${idx}`,
+              isValid: chunkAnalysis.validations.filter(v => !v.isValid).length === 0,
+              data: { violations: chunkAnalysis.validations.filter(v => !v.isValid) }
+            }));
+          },
+          onProgress: (current, total, percentage) => {
+            if (isMountedRef.current) {
+              setValidationProgress(prev => ({ ...prev, businessRules: percentage }));
+              console.log(`[Validation] Business Rules: ${percentage}% (${current}/${total})`);
+            }
+          },
+          signal
+        });
+
+        // Análise final para estatísticas
+        const businessRulesAnalysis = validateBusinessRules(allMappedData.slice(0, 100), businessRules);
 
         // Adicionar alertas baseados nas regras de negócio
         businessRulesAnalysis.validations.forEach(validation => {
@@ -567,7 +731,32 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
             );
 
             if (dateMapping) {
-              const seasonalAnalysis = analyzeSeasonalPatterns(csvSampleData, dateMapping.csvColumn, seasonalPatterns);
+              // ✅ NOVO: Análise sazonal em TODO o dataset
+              console.log(`[Validation] Iniciando análise sazonal para ${dataSize} registros`);
+              
+              const seasonalResult = await validateInChunks({
+                data: csvFullData,
+                chunkSize: 150,
+                validator: async (chunk: Record<string, string>[]) => {
+                  const chunkAnalysis = analyzeSeasonalPatterns(chunk, dateMapping.csvColumn, seasonalPatterns);
+                  
+                  return chunk.map((row, idx) => ({
+                    id: row.order_date || `seasonal-${idx}`,
+                    isValid: chunkAnalysis.validations.filter(v => !v.isValid).length === 0,
+                    data: { anomalies: chunkAnalysis.summary.anomalies }
+                  }));
+                },
+                onProgress: (current, total, percentage) => {
+                  if (isMountedRef.current) {
+                    setValidationProgress(prev => ({ ...prev, seasonal: percentage }));
+                    console.log(`[Validation] Sazonal: ${percentage}% (${current}/${total})`);
+                  }
+                },
+                signal
+              });
+
+              // Análise final para estatísticas
+              const seasonalAnalysis = analyzeSeasonalPatterns(csvFullData.slice(0, 100), dateMapping.csvColumn, seasonalPatterns);
 
               // Adicionar alertas baseados na análise sazonal
               seasonalAnalysis.validations.forEach(validation => {
@@ -627,7 +816,35 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
         // Detecção de fraudes
         if (fraudPatterns.length > 0) {
           try {
-            const fraudAnalysis = analyzeFraudPatterns(csvSampleData, fraudPatterns);
+            // ✅ NOVO: Análise de fraude em TODO o dataset
+            console.log(`[Validation] Iniciando análise de fraude para ${dataSize} registros`);
+            
+            const fraudResult = await validateInChunks({
+              data: csvFullData,
+              chunkSize: 100,
+              validator: async (chunk: Record<string, string>[]) => {
+                const chunkAnalysis = analyzeFraudPatterns(chunk, fraudPatterns);
+                
+                return chunk.map((row, idx) => ({
+                  id: row.tracking_code || `fraud-${idx}`,
+                  isValid: chunkAnalysis.alerts.length === 0,
+                  data: { 
+                    fraudAlerts: chunkAnalysis.alerts,
+                    riskLevel: chunkAnalysis.summary.blockedRecords > 0 ? 'high' : 'low'
+                  }
+                }));
+              },
+              onProgress: (current, total, percentage) => {
+                if (isMountedRef.current) {
+                  setValidationProgress(prev => ({ ...prev, fraud: percentage }));
+                  console.log(`[Validation] Fraude: ${percentage}% (${current}/${total})`);
+                }
+              },
+              signal
+            });
+
+            // Análise final para estatísticas
+            const fraudAnalysis = analyzeFraudPatterns(csvFullData.slice(0, 100), fraudPatterns);
 
             // Adicionar alertas baseados na detecção de fraudes
             fraudAnalysis.alerts.forEach(alert => {
@@ -770,20 +987,39 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
       suggestions.push('💡 Todos os campos foram validados com sucesso!');
     }
 
+    // ✅ NOVO: Calcular progresso overall baseado nas validações completas
+    const overallProgress = Math.round(
+      (validationProgress.tracking + 
+       validationProgress.cep + 
+       validationProgress.duplicates + 
+       validationProgress.businessRules + 
+       validationProgress.fraud + 
+       validationProgress.seasonal) / 6
+    );
+    
+    if (isMountedRef.current) {
+      setValidationProgress(prev => ({ ...prev, overall: overallProgress }));
+    }
+
+    // ✅ NOVO: Adicionar informações sobre dataset completo nas sugestões
+    suggestions.push(`📊 Dataset completo analisado: ${dataSize} registros`);
+    suggestions.push(`🔍 Validações executadas: Tracking, CEP, Duplicatas, Regras de Negócio, Fraude, Sazonal`);
+
     // 🔧 FIX: Só atualizar estado se o componente ainda estiver montado
     if (isMountedRef.current && !signal?.aborted) {
       console.log('[Validation] Validação concluída com sucesso, atualizando estado');
       setRealTimeValidation({
         isValid: alerts.filter(a => a.type === 'error').length === 0,
         alerts,
-        qualityScore,
+        qualityScore: Math.min(100, Math.max(0, qualityScore)), // Normalizar entre 0-100
         suggestions,
         previewData
       });
+      setIsValidatingComplete(true);
     } else {
       console.log('[Validation] Componente desmontado ou cancelado, não atualizando estado');
     }
-  }, [csvSampleData, validateTrackingCodes, validateCEPs, detectDuplicates, businessRules, validateBusinessRules, seasonalPatterns, analyzeSeasonalPatterns, fraudPatterns, analyzeFraudPatterns, csvHeaders, generateMappingSuggestions]);
+  }, [csvSampleData, csvFullData, dataSize, validateTrackingCodes, validateCEPs, detectDuplicates, businessRules, validateBusinessRules, seasonalPatterns, analyzeSeasonalPatterns, fraudPatterns, analyzeFraudPatterns, csvHeaders, generateMappingSuggestions, validateInChunks, validationProgress]);
 
   // 🔧 FIX 6: useEffect com debounce e AbortController
   useEffect(() => {
@@ -1049,6 +1285,89 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
             </div>
           </AlertDescription>
         </Alert>
+      )}
+
+      {/* ✅ NOVO: UI de Progresso de Validação */}
+      {(isProcessingChunks || validationProgress.overall > 0) && !isValidatingComplete && (
+        <Card className="border-blue-200 bg-blue-50 dark:bg-blue-950/20 dark:border-blue-800">
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <Activity className="h-5 w-5 text-blue-600 animate-pulse" />
+              Validando Dataset Completo ({dataSize} registros)
+            </CardTitle>
+            <CardDescription>
+              Processando todos os dados para fornecer validações precisas
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Progresso Geral */}
+            <div>
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-sm font-medium">Progresso Geral</span>
+                <span className="text-sm font-semibold text-blue-600">{validationProgress.overall}%</span>
+              </div>
+              <Progress value={validationProgress.overall} className="h-3" />
+            </div>
+
+            {/* Progresso Individual */}
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-muted-foreground">Tracking</span>
+                  <span className="text-xs font-medium">{validationProgress.tracking}%</span>
+                </div>
+                <Progress value={validationProgress.tracking} className="h-2" />
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-muted-foreground">CEP</span>
+                  <span className="text-xs font-medium">{validationProgress.cep}%</span>
+                </div>
+                <Progress value={validationProgress.cep} className="h-2" />
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-muted-foreground">Duplicatas</span>
+                  <span className="text-xs font-medium">{validationProgress.duplicates}%</span>
+                </div>
+                <Progress value={validationProgress.duplicates} className="h-2" />
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-muted-foreground">Regras</span>
+                  <span className="text-xs font-medium">{validationProgress.businessRules}%</span>
+                </div>
+                <Progress value={validationProgress.businessRules} className="h-2" />
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-muted-foreground">Fraude</span>
+                  <span className="text-xs font-medium">{validationProgress.fraud}%</span>
+                </div>
+                <Progress value={validationProgress.fraud} className="h-2" />
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-muted-foreground">Sazonal</span>
+                  <span className="text-xs font-medium">{validationProgress.seasonal}%</span>
+                </div>
+                <Progress value={validationProgress.seasonal} className="h-2" />
+              </div>
+            </div>
+
+            {isProcessingChunks && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>Processando em lotes de 50-200 registros por vez...</span>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       )}
 
           {/* Templates Compatíveis */}

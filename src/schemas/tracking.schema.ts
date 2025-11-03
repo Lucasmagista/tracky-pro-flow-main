@@ -15,7 +15,7 @@ export const trackingCodeSchema = z
   .min(8, 'Código deve ter no mínimo 8 caracteres')
   .max(50, 'Código deve ter no máximo 50 caracteres')
   .regex(
-    /^[A-Z0-9\-]+$/,
+    /^[A-Z0-9-]+$/,
     'Código deve conter apenas letras maiúsculas, números e hífen'
   )
   .trim();

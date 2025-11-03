@@ -7,6 +7,7 @@
  * @module lib/csrf
  */
 
+import React from 'react';
 import { randomBytes } from 'crypto';
 
 /**
@@ -259,9 +260,6 @@ export function useCSRFToken() {
 
   return { token, refreshToken };
 }
-
-// Import React para o hook
-import * as React from 'react';
 
 /**
  * Middleware para Supabase Edge Functions

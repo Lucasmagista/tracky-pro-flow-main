@@ -2,7 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 // Simulação de estado do WhatsApp (em produção seria persistido)
-let whatsappSessions = new Map<string, {
+const whatsappSessions = new Map<string, {
   isConnected: boolean;
   qrCode?: string;
   sessionId: string;

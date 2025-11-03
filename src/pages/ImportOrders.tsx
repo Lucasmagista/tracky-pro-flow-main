@@ -24,6 +24,7 @@ import SmartCSVMapping from "@/components/SmartCSVMapping";
 import { ImportHistory } from "@/components/ImportHistory";
 import { ImportMetricsDashboard } from "@/components/ImportMetricsDashboard";
 import { MappingTemplatesManager, MappingTemplate } from "@/components/MappingTemplatesManager";
+import { parseCSVFile, parseCSVText, formatParsingErrors } from "@/utils/csvParser";
 
 interface ParsedOrder {
   tracking_code: string;
@@ -193,6 +194,10 @@ const ImportOrders = () => {
   const [csvSampleData, setCsvSampleData] = useState<Record<string, string>[]>([]);
   const [rawCsvData, setRawCsvData] = useState<string[][]>([]);
   const [fieldMapping, setFieldMapping] = useState<Record<string, string>>({});
+  
+  // ✅ NOVO: Estados para dados completos (não apenas amostras)
+  const [csvFullData, setCsvFullData] = useState<Record<string, string>[]>([]);
+  const [dataSize, setDataSize] = useState<number>(0);
 
   // 🔧 FIX: Controlar fechamento seguro dos modais
   const handleCloseMapping = useCallback(() => {
@@ -458,14 +463,27 @@ const ImportOrders = () => {
 
   // Função para processar e validar dados CSV aprimorada
   const processCSVData = async (text: string): Promise<ParsedOrder[]> => {
-    const lines = text.split('\n').filter(line => line.trim() && !line.trim().startsWith('#'));
+    // ✅ NOVO: Usar parser robusto
+    const parseResult = parseCSVText(text, {
+      skipEmptyLines: 'greedy'
+    });
 
-    if (lines.length < 2) return [];
+    // Verificar erros de parsing
+    if (parseResult.errors.length > 0) {
+      console.warn('[processCSVData] Erros encontrados:', parseResult.errors);
+      const formattedErrors = formatParsingErrors(parseResult.errors);
+      if (formattedErrors.length > 0) {
+        toast.warning(`Problemas no CSV: ${formattedErrors.slice(0, 3).join(', ')}`);
+      }
+    }
 
-    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
-    const dataLines = lines.slice(1);
+    if (parseResult.data.length === 0) {
+      toast.error("Nenhum dado válido encontrado no CSV.");
+      return [];
+    }
 
     // Validar cabeçalhos obrigatórios
+    const headers = parseResult.headers;
     const requiredHeaders = ['tracking_code', 'customer_name', 'customer_email'];
     const missingHeaders = requiredHeaders.filter(h => !headers.includes(h));
 
@@ -474,45 +492,9 @@ const ImportOrders = () => {
       return [];
     }
 
-    return dataLines.map((line, index) => {
-      // Parser CSV melhorado que lida com aspas
-      const values: string[] = [];
-      let current = '';
-      let inQuotes = false;
-      let i = 0;
+    console.log('[processCSVData] Processando', parseResult.data.length, 'linhas');
 
-      while (i < line.length) {
-        const char = line[i];
-
-        if (char === '"') {
-          if (inQuotes && line[i + 1] === '"') {
-            // Aspas escapadas
-            current += '"';
-            i += 2;
-            continue;
-          } else {
-            inQuotes = !inQuotes;
-          }
-        } else if (char === ',' && !inQuotes) {
-          values.push(current.trim());
-          current = '';
-        } else {
-          current += char;
-        }
-        i++;
-      }
-      values.push(current.trim());
-
-      // Garantir que temos valores para todos os cabeçalhos
-      while (values.length < headers.length) {
-        values.push('');
-      }
-
-      const order: Record<string, string> = {};
-      headers.forEach((header, colIndex) => {
-        order[header] = values[colIndex] || '';
-      });
-
+    return parseResult.data.map((order, index) => {
       // Mapeamento de campos com fallbacks para compatibilidade
       const trackingCode = order.tracking_code || order['código_rastreio'] || order['código de rastreio do envio'] || '';
       const customerName = order.customer_name || order['nome_cliente'] || order['nome do comprador'] || order['nome para a entrega'] || '';
@@ -892,6 +874,20 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
     const file = event.target.files?.[0];
     if (!file || !user) return;
 
+    // ✅ NOVO: Limites de segurança
+    const SECURITY_LIMITS = {
+      MAX_FILE_SIZE: 50 * 1024 * 1024,  // 50MB
+      MAX_ROWS: 50000,                   // 50mil linhas
+      MAX_COLUMNS: 100                    // 100 colunas
+    };
+
+    // Validar tamanho do arquivo
+    if (file.size > SECURITY_LIMITS.MAX_FILE_SIZE) {
+      toast.error(`Arquivo muito grande. Tamanho máximo: ${SECURITY_LIMITS.MAX_FILE_SIZE / 1024 / 1024}MB`);
+      event.target.value = ''; // Reset input
+      return;
+    }
+
     setCsvLoading(true);
     try {
       let headers: string[] = [];
@@ -923,39 +919,65 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
 
         toast.success(`Arquivo Excel processado: ${dataRows.length} linhas encontradas.`);
       } else {
-        // Processar arquivo CSV (lógica existente)
-        const text = await file.text();
-        const rows = text.split('\n').filter(row => row.trim());
-        if (rows.length < 2) {
-          toast.error("Arquivo deve conter pelo menos um cabeçalho e uma linha de dados.");
-          return;
-        }
+        // ✅ NOVO: Processar arquivo CSV com parser robusto
+        try {
+          const parseResult = await parseCSVFile(file, {
+            skipEmptyLines: 'greedy'
+          });
 
-        // Parse CSV básico
-        const parsedRows: string[][] = rows.map(row => {
-          const result = [];
-          let current = '';
-          let inQuotes = false;
-
-          for (let i = 0; i < row.length; i++) {
-            const char = row[i];
-            if (char === '"') {
-              inQuotes = !inQuotes;
-            } else if (char === ',' && !inQuotes) {
-              result.push(current.trim());
-              current = '';
-            } else {
-              current += char;
+          // Verificar se há erros críticos
+          if (parseResult.errors.length > 0) {
+            console.warn('[ImportOrders] Erros encontrados durante parsing:', parseResult.errors);
+            const formattedErrors = formatParsingErrors(parseResult.errors);
+            
+            // Se houver muitos erros, mostrar apenas os primeiros
+            if (formattedErrors.length > 5) {
+              toast.warning(`${formattedErrors.length} problemas encontrados. Primeiros 5:\n${formattedErrors.slice(0, 5).join('\n')}`, {
+                duration: 8000
+              });
+            } else if (formattedErrors.length > 0) {
+              toast.warning(`Problemas encontrados:\n${formattedErrors.join('\n')}`, {
+                duration: 6000
+              });
             }
           }
-          result.push(current.trim());
-          return result;
-        });
 
-        headers = parsedRows[0];
-        dataRows = parsedRows.slice(1).filter(row => row.some(cell => cell.trim()));
+          // Verificar se há dados
+          if (parseResult.data.length === 0) {
+            toast.error("Arquivo CSV não contém dados válidos.");
+            return;
+          }
 
-        toast.success(`Arquivo CSV processado: ${dataRows.length} linhas encontradas.`);
+          // Mostrar informações sobre o parsing
+          console.log('[ImportOrders] CSV parsing info:', {
+            encoding: parseResult.meta.encoding,
+            delimiter: parseResult.meta.delimiter,
+            totalRows: parseResult.stats.totalRows,
+            validRows: parseResult.stats.validRows,
+            emptyRows: parseResult.stats.emptyRows,
+            errorRows: parseResult.stats.errorRows
+          });
+
+          // Informar sobre encoding e delimitador detectados
+          const delimiterName = parseResult.meta.delimiter === ';' ? 'ponto-e-vírgula' : 
+                                parseResult.meta.delimiter === '\t' ? 'tab' : 'vírgula';
+          
+          toast.info(`Arquivo detectado: ${parseResult.meta.encoding}, delimitador: ${delimiterName}`, {
+            duration: 4000
+          });
+
+          // Converter para formato esperado (array de arrays)
+          headers = parseResult.headers;
+          dataRows = parseResult.data.map(row => 
+            headers.map(header => row[header] || '')
+          );
+
+          toast.success(`Arquivo CSV processado: ${parseResult.stats.validRows} linhas válidas encontradas.`);
+        } catch (parseError) {
+          console.error('[ImportOrders] Erro ao parsear CSV:', parseError);
+          toast.error("Erro ao processar arquivo CSV. Verifique o formato e tente novamente.");
+          return;
+        }
       }
 
       if (dataRows.length === 0) {
@@ -963,8 +985,28 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
         return;
       }
 
-      // Converter para formato de objeto
-      const sampleData = dataRows.slice(0, 3).map(row => {
+      // ✅ NOVO: Validar limites de linhas e colunas
+      if (dataRows.length > SECURITY_LIMITS.MAX_ROWS) {
+        toast.error(`Arquivo possui ${dataRows.length} linhas. Máximo permitido: ${SECURITY_LIMITS.MAX_ROWS} linhas`);
+        event.target.value = ''; // Reset input
+        return;
+      }
+
+      if (headers.length > SECURITY_LIMITS.MAX_COLUMNS) {
+        toast.error(`Arquivo possui ${headers.length} colunas. Máximo permitido: ${SECURITY_LIMITS.MAX_COLUMNS} colunas`);
+        event.target.value = ''; // Reset input
+        return;
+      }
+
+      // ✅ Informar usuário sobre arquivo grande
+      if (dataRows.length > 5000) {
+        toast.info(`Arquivo grande detectado (${dataRows.length} linhas). Validação otimizada em progresso...`, {
+          duration: 5000
+        });
+      }
+
+      // ✅ NOVO: Processar TODAS as linhas para dados completos
+      const fullData = dataRows.map(row => {
         const obj: Record<string, string> = {};
         headers.forEach((header, index) => {
           obj[header] = row[index] || '';
@@ -972,12 +1014,18 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
         return obj;
       });
 
+      // ✅ Manter sample pequeno apenas para preview inicial da UI
+      const sampleData = fullData.slice(0, 5);
+
       setCsvHeaders(headers);
-      setCsvSampleData(sampleData);
+      setCsvSampleData(sampleData); // Preview na UI
+      setCsvFullData(fullData);      // ✅ NOVO: Todos os dados para validação
+      setDataSize(fullData.length);  // ✅ NOVO: Total de linhas
       setRawCsvData([headers, ...dataRows]); // Incluir headers no raw data
       setShowMapping(true);
 
-      toast.success(`${dataRows.length} linhas encontradas. Configure o mapeamento dos campos.`);
+      console.log(`[ImportOrders] Processamento completo: ${fullData.length} linhas (mostrando ${sampleData.length} no preview)`);
+      toast.success(`${fullData.length} linhas encontradas. Configure o mapeamento dos campos.`);
     } catch (error) {
       console.error("Error processing file:", error);
       toast.error("Erro ao processar arquivo. Verifique o formato e tente novamente.");
@@ -2378,6 +2426,8 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
                   <SmartCSVMapping
                     csvHeaders={csvHeaders}
                     csvSampleData={csvSampleData}
+                    csvFullData={csvFullData}
+                    dataSize={dataSize}
                     onMappingComplete={processCSVWithMapping}
                     onCancel={handleCloseMapping}
                   />
