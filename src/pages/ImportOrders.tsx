@@ -25,6 +25,7 @@ import { ImportHistory } from "@/components/ImportHistory";
 import { ImportMetricsDashboard } from "@/components/ImportMetricsDashboard";
 import { MappingTemplatesManager, MappingTemplate } from "@/components/MappingTemplatesManager";
 import { parseCSVFile, parseCSVText, formatParsingErrors } from "@/utils/csvParser";
+import { processImport, type ProcessingResult, type NormalizedOrder } from "@/lib/csv-templates";
 
 interface ParsedOrder {
   tracking_code: string;
@@ -187,6 +188,10 @@ const ImportOrders = () => {
   // Estados para métricas de importação
   const [importMetrics, setImportMetrics] = useState<ImportMetrics | null>(null);
   const [showMetrics, setShowMetrics] = useState(false);
+
+  // 🆕 Estados para sistema inteligente de detecção CSV
+  const [processingResult, setProcessingResult] = useState<ProcessingResult | null>(null);
+  const [showIntelligentPreview, setShowIntelligentPreview] = useState(false);
 
   // Estados para mapeamento CSV
   const [showMapping, setShowMapping] = useState(false);
@@ -874,7 +879,7 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
     const file = event.target.files?.[0];
     if (!file || !user) return;
 
-    // ✅ NOVO: Limites de segurança
+    // ✅ Limites de segurança
     const SECURITY_LIMITS = {
       MAX_FILE_SIZE: 50 * 1024 * 1024,  // 50MB
       MAX_ROWS: 50000,                   // 50mil linhas
@@ -889,150 +894,120 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
     }
 
     setCsvLoading(true);
+    setShowMetrics(true); // Mostrar painel de métricas durante processamento
+    
     try {
-      let headers: string[] = [];
-      let dataRows: string[][] = [];
-
-      // Detectar tipo de arquivo
-      const fileExtension = file.name.split('.').pop()?.toLowerCase();
-
-      if (fileExtension === 'xlsx' || fileExtension === 'xls') {
-        // Processar arquivo Excel
-        const arrayBuffer = await file.arrayBuffer();
-        const XLSX = await import('xlsx');
-        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-
-        // Usar a primeira planilha
-        const sheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[sheetName];
-
-        // Converter para array de arrays
-        const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' }) as string[][];
-
-        if (jsonData.length < 2) {
-          toast.error("Arquivo Excel deve conter pelo menos um cabeçalho e uma linha de dados.");
-          return;
-        }
-
-        headers = jsonData[0].map(h => String(h || '').trim());
-        dataRows = jsonData.slice(1).map(row => row.map(cell => String(cell || '').trim())).filter(row => row.some(cell => cell));
-
-        toast.success(`Arquivo Excel processado: ${dataRows.length} linhas encontradas.`);
-      } else {
-        // ✅ NOVO: Processar arquivo CSV com parser robusto
-        try {
-          const parseResult = await parseCSVFile(file, {
-            skipEmptyLines: 'greedy'
-          });
-
-          // Verificar se há erros críticos
-          if (parseResult.errors.length > 0) {
-            console.warn('[ImportOrders] Erros encontrados durante parsing:', parseResult.errors);
-            const formattedErrors = formatParsingErrors(parseResult.errors);
-            
-            // Se houver muitos erros, mostrar apenas os primeiros
-            if (formattedErrors.length > 5) {
-              toast.warning(`${formattedErrors.length} problemas encontrados. Primeiros 5:\n${formattedErrors.slice(0, 5).join('\n')}`, {
-                duration: 8000
-              });
-            } else if (formattedErrors.length > 0) {
-              toast.warning(`Problemas encontrados:\n${formattedErrors.join('\n')}`, {
-                duration: 6000
-              });
-            }
-          }
-
-          // Verificar se há dados
-          if (parseResult.data.length === 0) {
-            toast.error("Arquivo CSV não contém dados válidos.");
-            return;
-          }
-
-          // Mostrar informações sobre o parsing
-          console.log('[ImportOrders] CSV parsing info:', {
-            encoding: parseResult.meta.encoding,
-            delimiter: parseResult.meta.delimiter,
-            totalRows: parseResult.stats.totalRows,
-            validRows: parseResult.stats.validRows,
-            emptyRows: parseResult.stats.emptyRows,
-            errorRows: parseResult.stats.errorRows
-          });
-
-          // Informar sobre encoding e delimitador detectados
-          const delimiterName = parseResult.meta.delimiter === ';' ? 'ponto-e-vírgula' : 
-                                parseResult.meta.delimiter === '\t' ? 'tab' : 'vírgula';
-          
-          toast.info(`Arquivo detectado: ${parseResult.meta.encoding}, delimitador: ${delimiterName}`, {
-            duration: 4000
-          });
-
-          // Converter para formato esperado (array de arrays)
-          headers = parseResult.headers;
-          dataRows = parseResult.data.map(row => 
-            headers.map(header => row[header] || '')
-          );
-
-          toast.success(`Arquivo CSV processado: ${parseResult.stats.validRows} linhas válidas encontradas.`);
-        } catch (parseError) {
-          console.error('[ImportOrders] Erro ao parsear CSV:', parseError);
-          toast.error("Erro ao processar arquivo CSV. Verifique o formato e tente novamente.");
-          return;
-        }
-      }
-
-      if (dataRows.length === 0) {
-        toast.error("Nenhum dado encontrado no arquivo.");
-        return;
-      }
-
-      // ✅ NOVO: Validar limites de linhas e colunas
-      if (dataRows.length > SECURITY_LIMITS.MAX_ROWS) {
-        toast.error(`Arquivo possui ${dataRows.length} linhas. Máximo permitido: ${SECURITY_LIMITS.MAX_ROWS} linhas`);
-        event.target.value = ''; // Reset input
-        return;
-      }
-
-      if (headers.length > SECURITY_LIMITS.MAX_COLUMNS) {
-        toast.error(`Arquivo possui ${headers.length} colunas. Máximo permitido: ${SECURITY_LIMITS.MAX_COLUMNS} colunas`);
-        event.target.value = ''; // Reset input
-        return;
-      }
-
-      // ✅ Informar usuário sobre arquivo grande
-      if (dataRows.length > 5000) {
-        toast.info(`Arquivo grande detectado (${dataRows.length} linhas). Validação otimizada em progresso...`, {
-          duration: 5000
-        });
-      }
-
-      // ✅ NOVO: Processar TODAS as linhas para dados completos
-      const fullData = dataRows.map(row => {
-        const obj: Record<string, string> = {};
-        headers.forEach((header, index) => {
-          obj[header] = row[index] || '';
-        });
-        return obj;
+      // 🆕 Usar sistema inteligente de detecção e processamento
+      console.log('[ImportOrders] Iniciando processamento inteligente do arquivo...');
+      toast.info('🔍 Detectando formato e validando dados...');
+      
+      const result = await processImport(file, {
+        autoFix: true,  // Corrigir automaticamente problemas conhecidos
+        strictValidation: false  // Validação flexível para permitir avisos
       });
 
-      // ✅ Manter sample pequeno apenas para preview inicial da UI
-      const sampleData = fullData.slice(0, 5);
+      setProcessingResult(result);
 
-      setCsvHeaders(headers);
-      setCsvSampleData(sampleData); // Preview na UI
-      setCsvFullData(fullData);      // ✅ NOVO: Todos os dados para validação
-      setDataSize(fullData.length);  // ✅ NOVO: Total de linhas
-      setRawCsvData([headers, ...dataRows]); // Incluir headers no raw data
-      setShowMapping(true);
+      if (!result.success) {
+        // Mostrar erros de detecção/validação
+        toast.error(result.detection.suggestions?.join('. ') || 'Erro ao processar arquivo');
+        
+        if (result.detection.confidence === 0) {
+          // Fallback para mapeamento manual
+          toast.info('📋 Não foi possível detectar o formato automaticamente. Use o mapeamento manual.');
+          
+          // TODO: Abrir modal de mapeamento manual
+          // Aqui você pode chamar a lógica antiga de mapeamento CSV
+          setCsvLoading(false);
+          return;
+        }
+      }
 
-      console.log(`[ImportOrders] Processamento completo: ${fullData.length} linhas (mostrando ${sampleData.length} no preview)`);
-      toast.success(`${fullData.length} linhas encontradas. Configure o mapeamento dos campos.`);
+      // Mostrar resultados da detecção
+      const platformName = result.detection.platform === 'nuvemshop' ? 'NuvemShop' :
+                          result.detection.platform === 'shopify' ? 'Shopify' :
+                          result.detection.platform === 'mercadolivre' ? 'Mercado Livre' :
+                          'Formato Personalizado';
+      
+      toast.success(
+        `✅ Formato detectado: ${platformName} (${result.detection.confidence}% de confiança)`,
+        { duration: 6000 }
+      );
+
+      // Mostrar estatísticas
+      console.log('[ImportOrders] Resultado do processamento:', {
+        platform: result.detection.platform,
+        confidence: result.detection.confidence,
+        totalOrders: result.orders.length,
+        validOrders: result.validation.stats.validOrders,
+        invalidOrders: result.validation.stats.invalidOrders,
+        warnings: result.validation.warnings.length,
+        errors: result.validation.errors.length
+      });
+
+      // Converter orders para ParsedOrder format para compatibilidade com UI existente
+      const convertedOrders: ParsedOrder[] = result.orders.map((order: NormalizedOrder) => ({
+        tracking_code: order.tracking_code,
+        customer_name: order.customer_name,
+        customer_email: order.customer_email,
+        customer_phone: order.customer_phone || undefined,
+        carrier: order.shipping_address?.country || 'Brasil',
+        status: result.validation.errors.some(e => e.row === result.orders.indexOf(order)) ? 'invalid' :
+                result.validation.warnings.some(w => w.row === result.orders.indexOf(order)) ? 'warning' : 'valid',
+        errors: result.validation.errors
+          .filter(e => e.row === result.orders.indexOf(order))
+          .map(e => e.message),
+        warnings: result.validation.warnings
+          .filter(w => w.row === result.orders.indexOf(order))
+          .map(w => w.message),
+        // Campos adicionais
+        order_value: order.total?.toString(),
+        destination: order.shipping_address?.city,
+        order_date: order.order_date,
+        product_name: order.items?.[0]?.name,
+        quantity: order.items?.[0]?.quantity?.toString(),
+        order_number: order.order_id,
+        notes: order.notes,
+        // Campos de endereço
+        delivery_address: order.shipping_address?.street,
+        delivery_number: order.shipping_address?.number,
+        delivery_complement: order.shipping_address?.complement,
+        delivery_neighborhood: order.shipping_address?.neighborhood,
+        delivery_city: order.shipping_address?.city,
+        delivery_state: order.shipping_address?.state,
+        delivery_zipcode: order.shipping_address?.zip_code,
+        delivery_country: order.shipping_address?.country,
+        // Campos de negócio
+        subtotal: order.items?.reduce((sum, item) => sum + (item.price * item.quantity), 0).toString(),
+        shipping_cost: order.shipping_cost?.toString(),
+        total: order.total.toString(),
+        order_status: order.order_status,
+        shipping_status: order.shipping_status,
+        payment_method: order.payment_method,
+        shipping_method: order.shipping_method
+      }));
+
+      setParsedOrders(convertedOrders);
+      
+      // Gerar notificação com estatísticas
+      toast.success(
+        `📊 ${result.orders.length} pedidos processados: ` +
+        `${result.validation.stats.validOrders} válidos, ` +
+        `${result.validation.warnings.length} avisos, ` +
+        `${result.validation.errors.length} erros`,
+        { duration: 8000 }
+      );
+
+      // Mostrar preview
+      setShowPreview(true);
+      setShowIntelligentPreview(true);
+
     } catch (error) {
-      console.error("Error processing file:", error);
-      toast.error("Erro ao processar arquivo. Verifique o formato e tente novamente.");
+      console.error('[ImportOrders] Erro ao processar arquivo:', error);
+      toast.error(`Erro ao processar arquivo: ${error instanceof Error ? error.message : 'Erro desconhecido'}`);
     } finally {
       setCsvLoading(false);
-      // Reset file input
-      event.target.value = '';
+      event.target.value = ''; // Reset file input
     }
   };
 
@@ -2024,6 +1999,66 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
                   Revise os dados antes de confirmar a importação. {parsedOrders.length} pedidos encontrados.
                 </DialogDescription>
               </DialogHeader>
+
+              {/* 🆕 Informações de Detecção Inteligente */}
+              {showIntelligentPreview && processingResult && (
+                <div className="mb-6 p-4 bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg border border-blue-200">
+                  <div className="flex items-start justify-between mb-3">
+                    <div>
+                      <h4 className="font-semibold text-blue-900 flex items-center gap-2 mb-1">
+                        <CheckCircle className="w-5 h-5 text-blue-600" />
+                        Detecção Automática
+                      </h4>
+                      <p className="text-sm text-blue-700">
+                        Sistema identificou automaticamente o formato do arquivo
+                      </p>
+                    </div>
+                    <Badge variant="secondary" className="bg-blue-100 text-blue-800 border-blue-300">
+                      {processingResult.detection.confidence}% confiança
+                    </Badge>
+                  </div>
+                  
+                  <div className="grid md:grid-cols-3 gap-4">
+                    <div className="space-y-1">
+                      <div className="text-xs font-medium text-blue-600 uppercase">Plataforma</div>
+                      <div className="font-semibold text-blue-900 text-lg">
+                        {processingResult.detection.platform === 'nuvemshop' ? '🛒 NuvemShop' :
+                         processingResult.detection.platform === 'shopify' ? '🛍️ Shopify' :
+                         processingResult.detection.platform === 'mercadolivre' ? '🏪 Mercado Livre' :
+                         '📦 Formato Personalizado'}
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-xs font-medium text-blue-600 uppercase">Headers Detectados</div>
+                      <div className="font-semibold text-blue-900 text-lg">
+                        {processingResult.detection.matchedHeaders.length} de {processingResult.detection.matchedHeaders.length} campos
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-xs font-medium text-blue-600 uppercase">Validação</div>
+                      <div className="flex gap-2">
+                        <Badge variant="outline" className="bg-green-50 text-green-700 border-green-300">
+                          {processingResult.validation.stats.validOrders} válidos
+                        </Badge>
+                        {processingResult.validation.warnings.length > 0 && (
+                          <Badge variant="outline" className="bg-yellow-50 text-yellow-700 border-yellow-300">
+                            {processingResult.validation.warnings.length} avisos
+                          </Badge>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {processingResult.detection.suggestions && processingResult.detection.suggestions.length > 0 && (
+                    <Alert className="mt-3 border-blue-300 bg-blue-50">
+                      <AlertTriangle className="h-4 w-4 text-blue-600" />
+                      <AlertDescription className="text-sm text-blue-800">
+                        <strong>Sugestões:</strong> {processingResult.detection.suggestions.join('. ')}
+                      </AlertDescription>
+                    </Alert>
+                  )}
+                </div>
+              )}
 
               <div className="space-y-4">
                 {/* Summary */}
