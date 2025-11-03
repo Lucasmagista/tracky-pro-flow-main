@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import Navbar from "@/components/Navbar";
 import { SkeletonForm, SkeletonTable } from "@/components/SkeletonLoaders";
 import { Button } from "@/components/ui/button";
@@ -193,6 +193,27 @@ const ImportOrders = () => {
   const [csvSampleData, setCsvSampleData] = useState<Record<string, string>[]>([]);
   const [rawCsvData, setRawCsvData] = useState<string[][]>([]);
   const [fieldMapping, setFieldMapping] = useState<Record<string, string>>({});
+
+  // 🔧 FIX: Controlar fechamento seguro dos modais
+  const handleCloseMapping = useCallback(() => {
+    console.log('[ImportOrders] Fechando modal de mapeamento');
+    setShowMapping(false);
+    // Limpar dados CSV após fechar
+    setTimeout(() => {
+      setCsvHeaders([]);
+      setCsvSampleData([]);
+      setRawCsvData([]);
+    }, 300); // Aguardar animação de fechamento
+  }, []);
+
+  const handleClosePreview = useCallback(() => {
+    console.log('[ImportOrders] Fechando modal de preview');
+    setShowPreview(false);
+    // Limpar dados após fechar
+    setTimeout(() => {
+      setParsedOrders([]);
+    }, 300); // Aguardar animação de fechamento
+  }, []);
 
   // Marketplace integrations - REAL hooks
   const shopify = useShopifyIntegrationReal();
@@ -400,12 +421,14 @@ const ImportOrders = () => {
   // Função para processar CSV com mapeamento de campos
   // Corrigir assinatura para aceitar apenas o mapping, conforme esperado pelo SmartCSVMapping
   const processCSVWithMapping = async (mapping: Record<string, string>) => {
+    console.log('[ProcessCSV] Iniciando processamento com mapeamento:', mapping);
+
     // Reconstrói os dados do CSV conforme o novo mapping
     // csvHeaders: headers originais do arquivo
     // csvSampleData: array de objetos {header: valor}
     if (!csvHeaders || !csvSampleData || csvSampleData.length === 0) {
       toast.error('Dados do CSV não encontrados para processar o mapeamento.');
-      setShowMapping(false);
+      handleCloseMapping();
       return;
     }
 
@@ -429,7 +452,7 @@ const ImportOrders = () => {
     // Processa os pedidos usando a função existente
     const parsedOrders = await processCSVData(csvText);
     setParsedOrders(parsedOrders);
-    setShowMapping(false);
+    handleCloseMapping(); // Usar função de fechamento seguro
     setShowPreview(true);
   };
 
@@ -1079,7 +1102,7 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
   // Função de importação em chunks para grandes volumes
   const executeImport = async () => {
     setLoading(true);
-    setShowPreview(false);
+    handleClosePreview(); // Fechar preview de forma segura
 
     try {
       const validOrders = parsedOrders.filter(order => order.status !== 'invalid');
@@ -1942,7 +1965,7 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
           )}
 
           {/* Preview Modal */}
-          <Dialog open={showPreview} onOpenChange={setShowPreview}>
+          <Dialog open={showPreview} onOpenChange={handleClosePreview}>
             <DialogContent className="max-w-6xl max-h-[80vh] overflow-y-auto">
               <DialogHeader>
                 <DialogTitle className="flex items-center gap-2">
@@ -2253,7 +2276,7 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
                 </div>
 
                 <div className="flex justify-end gap-3 pt-4 border-t">
-                  <Button variant="outline" onClick={() => setShowPreview(false)}>
+                  <Button variant="outline" onClick={handleClosePreview}>
                     Cancelar
                   </Button>
                   <Button
@@ -2325,7 +2348,7 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
           </Dialog>
 
           {/* Smart CSV Mapping Modal */}
-          <Dialog open={showMapping} onOpenChange={setShowMapping}>
+          <Dialog open={showMapping} onOpenChange={handleCloseMapping}>
             <DialogContent className="max-w-7xl w-[95vw] max-h-[95vh] overflow-hidden flex flex-col">
               <DialogHeader>
                 <DialogTitle className="flex items-center gap-2">
@@ -2351,12 +2374,14 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
                     }}
                   />
                 </div>
-                <SmartCSVMapping
-                  csvHeaders={csvHeaders}
-                  csvSampleData={csvSampleData}
-                  onMappingComplete={processCSVWithMapping}
-                  onCancel={() => setShowMapping(false)}
-                />
+                {showMapping && csvHeaders.length > 0 && (
+                  <SmartCSVMapping
+                    csvHeaders={csvHeaders}
+                    csvSampleData={csvSampleData}
+                    onMappingComplete={processCSVWithMapping}
+                    onCancel={handleCloseMapping}
+                  />
+                )}
               </div>
             </DialogContent>
           </Dialog>

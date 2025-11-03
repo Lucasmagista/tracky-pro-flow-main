@@ -16,6 +16,7 @@ import { useBusinessRules } from "@/hooks/useBusinessRules";
 import { useSeasonalValidation } from "@/hooks/useSeasonalValidation";
 import { useFraudDetection } from "@/hooks/useFraudDetection";
 import { useMLMappingLearning } from "@/hooks/useMLMappingLearning";
+import { useDebounce } from "@/hooks/useDebounce";
 
 interface ValidationAlert {
   type: 'error' | 'warning' | 'info' | 'success';
@@ -86,13 +87,26 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
   const [compatibleTemplates, setCompatibleTemplates] = useState<CSVTemplate[]>([]);
   const [selectedTemplate, setSelectedTemplate] = useState<string>('');
 
-  // Ref para controlar se o componente está montado
+  // 🔧 FIX 1: Ref para controlar se o componente está montado
   const isMountedRef = useRef(true);
+  
+  // 🔧 FIX 2: AbortController para cancelar validações assíncronas
+  const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Cleanup quando o componente for desmontado
+  // 🔧 FIX 3: Debounce nos mappings para evitar validações excessivas
+  const debouncedMappings = useDebounce(mappings, 500);
+
+  // 🔧 FIX 4: Cleanup completo quando o componente for desmontado
   useEffect(() => {
     return () => {
+      console.log('[SmartCSVMapping] Desmontando componente - limpando recursos');
       isMountedRef.current = false;
+      
+      // Cancelar todas as requisições pendentes
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
     };
   }, []);
 
@@ -118,18 +132,34 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
         return mapping;
       });
 
-      setMappings(updatedMappings);
-      setSelectedTemplate(templateId);
-
-      // Executar validação em tempo real após aplicar template
-      performRealTimeValidation(updatedMappings);
+      if (isMountedRef.current) {
+        setMappings(updatedMappings);
+        setSelectedTemplate(templateId);
+      }
     } catch (error) {
       console.error('Erro ao aplicar template:', error);
     }
   };
 
-  // Função de validação em tempo real
-  const performRealTimeValidation = useCallback(async (currentMappings: DetectedField[]) => {
+  // 🔧 FIX 5: Função de validação em tempo real com cancelamento e controle de montagem
+  const performRealTimeValidation = useCallback(async (
+    currentMappings: DetectedField[],
+    signal?: AbortSignal
+  ) => {
+    // Não executar se o componente foi desmontado
+    if (!isMountedRef.current) {
+      console.log('[Validation] Componente desmontado, abortando validação');
+      return;
+    }
+
+    // Cancelar se o signal foi abortado
+    if (signal?.aborted) {
+      console.log('[Validation] Signal abortado, parando validação');
+      return;
+    }
+
+    console.log('[Validation] Iniciando validação em tempo real');
+    
     const alerts: ValidationAlert[] = [];
     const suggestions: string[] = [];
     let qualityScore = 0;
@@ -148,6 +178,12 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
       });
     } else {
       qualityScore += 30; // Pontos por campos obrigatórios
+    }
+
+    // 🔧 CHECK: Verificar se foi cancelado
+    if (!isMountedRef.current || signal?.aborted) {
+      console.log('[Validation] Cancelado após verificação de campos obrigatórios');
+      return;
     }
 
     // Verificar duplicatas
@@ -172,12 +208,25 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
 
     // Validação de códigos de rastreio
     if (trackingMapping) {
+      // 🔧 CHECK: Verificar se foi cancelado antes de validação assíncrona
+      if (!isMountedRef.current || signal?.aborted) {
+        console.log('[Validation] Cancelado antes de validação de tracking');
+        return;
+      }
+
       const trackingCodes = csvSampleData.slice(0, 5).map(row => row[trackingMapping.csvColumn] || '').filter(code => code.trim());
       const carriers = carrierMapping ? csvSampleData.slice(0, 5).map(row => row[carrierMapping.csvColumn] || '') : undefined;
 
       if (trackingCodes.length > 0) {
         try {
           const trackingResults = await validateTrackingCodes(trackingCodes, carriers);
+          
+          // 🔧 CHECK: Verificar após operação assíncrona
+          if (!isMountedRef.current || signal?.aborted) {
+            console.log('[Validation] Cancelado após validação de tracking');
+            return;
+          }
+
           const validCount = Object.values(trackingResults).filter(r => r.isValid).length;
           const validRatio = validCount / trackingCodes.length;
 
@@ -213,23 +262,39 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
             }
           }
         } catch (error) {
-          alerts.push({
-            type: 'info',
-            title: 'Validação de Rastreio Indisponível',
-            message: 'Não foi possível validar os códigos de rastreio no momento',
-            suggestion: 'A validação será feita durante a importação'
-          });
+          // Não adicionar erro se foi cancelado
+          if (!signal?.aborted) {
+            alerts.push({
+              type: 'info',
+              title: 'Validação de Rastreio Indisponível',
+              message: 'Não foi possível validar os códigos de rastreio no momento',
+              suggestion: 'A validação será feita durante a importação'
+            });
+          }
         }
       }
     }
 
     // Validação de CEPs
     if (cepMapping) {
+      // 🔧 CHECK: Verificar se foi cancelado antes de validação assíncrona
+      if (!isMountedRef.current || signal?.aborted) {
+        console.log('[Validation] Cancelado antes de validação de CEP');
+        return;
+      }
+
       const ceps = csvSampleData.slice(0, 5).map(row => row[cepMapping.csvColumn] || '').filter(cep => cep.trim());
 
       if (ceps.length > 0) {
         try {
           const cepResults = await validateCEPs(ceps);
+          
+          // 🔧 CHECK: Verificar após operação assíncrona
+          if (!isMountedRef.current || signal?.aborted) {
+            console.log('[Validation] Cancelado após validação de CEP');
+            return;
+          }
+
           const validCount = Object.values(cepResults).filter(r => r.isValid).length;
           const validRatio = validCount / ceps.length;
 
@@ -246,14 +311,23 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
             suggestions.push('✅ CEPs validados com sucesso');
           }
         } catch (error) {
-          alerts.push({
-            type: 'info',
-            title: 'Validação de CEP Indisponível',
-            message: 'Não foi possível validar os CEPs no momento',
-            suggestion: 'A validação será feita durante a importação'
-          });
+          // Não adicionar erro se foi cancelado
+          if (!signal?.aborted) {
+            alerts.push({
+              type: 'info',
+              title: 'Validação de CEP Indisponível',
+              message: 'Não foi possível validar os CEPs no momento',
+              suggestion: 'A validação será feita durante a importação'
+            });
+          }
         }
       }
+    }
+
+    // 🔧 CHECK: Verificar se foi cancelado
+    if (!isMountedRef.current || signal?.aborted) {
+      console.log('[Validation] Cancelado após validação de CEP');
+      return;
     }
 
     // Validar qualidade dos dados mapeados
@@ -339,6 +413,12 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
 
     // Detecção de duplicatas
     try {
+      // 🔧 CHECK: Verificar se foi cancelado antes de análise pesada
+      if (!isMountedRef.current || signal?.aborted) {
+        console.log('[Validation] Cancelado antes de detecção de duplicatas');
+        return;
+      }
+
       const sampleOrders = csvSampleData.slice(0, 10).map(row => {
         const order: Record<string, string> = {};
         currentMappings.forEach(mapping => {
@@ -350,6 +430,12 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
       });
 
       const duplicateAnalysis = await detectDuplicates(sampleOrders);
+
+      // 🔧 CHECK: Verificar após operação assíncrona
+      if (!isMountedRef.current || signal?.aborted) {
+        console.log('[Validation] Cancelado após detecção de duplicatas');
+        return;
+      }
 
       if (duplicateAnalysis.summary.totalDuplicates > 0) {
         alerts.push({
@@ -378,13 +464,16 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
         suggestions.push('✅ Nenhuma duplicata detectada nos dados de exemplo');
       }
     } catch (error) {
-      console.error('Erro na detecção de duplicatas:', error);
-      alerts.push({
-        type: 'info',
-        title: 'Detecção de Duplicatas Indisponível',
-        message: 'Não foi possível verificar duplicatas no momento',
-        suggestion: 'A verificação será feita durante a importação'
-      });
+      // Não adicionar erro se foi cancelado
+      if (!signal?.aborted) {
+        console.error('Erro na detecção de duplicatas:', error);
+        alerts.push({
+          type: 'info',
+          title: 'Detecção de Duplicatas Indisponível',
+          message: 'Não foi possível verificar duplicatas no momento',
+          suggestion: 'A verificação será feita durante a importação'
+        });
+      }
     }
 
     // Validação de regras de negócio
@@ -604,34 +693,54 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
           suggestions.push('💡 Considere configurar padrões de fraude para detectar atividades suspeitas');
         }
 
-        // Sugestões baseadas em aprendizado de máquina
-        try {
-          const mlSuggestions = await generateMappingSuggestions(csvHeaders, csvSampleData);
+    // Sugestões baseadas em aprendizado de máquina
+    try {
+      // 🔧 CHECK: Verificar se foi cancelado antes de análise de ML
+      if (!isMountedRef.current || signal?.aborted) {
+        console.log('[Validation] Cancelado antes de sugestões de ML');
+        return;
+      }
 
-          if (mlSuggestions.length > 0) {
-            // Adicionar sugestões de mapeamento baseadas em ML
-            mlSuggestions.forEach(suggestion => {
-              if (suggestion.confidence > 0.7) {
-                suggestions.push(`🤖 ML sugere mapear "${suggestion.csvColumn}" para "${SYSTEM_FIELDS.find(f => f.key === suggestion.suggestedField)?.label || suggestion.suggestedField}" (${Math.round(suggestion.confidence * 100)}% confiança)`);
-                qualityScore += 5; // Bônus por sugestões de ML
-              }
-            });
+      const mlSuggestions = await generateMappingSuggestions(csvHeaders, csvSampleData);
 
-            // Adicionar estatísticas de ML
-            const highConfidenceSuggestions = mlSuggestions.filter(s => s.confidence > 0.8);
-            if (highConfidenceSuggestions.length > 0) {
-              alerts.push({
-                type: 'info',
-                title: 'Sugestões de IA Disponíveis',
-                message: `${highConfidenceSuggestions.length} sugestões de mapeamento com alta confiança baseadas no aprendizado de máquina`,
-                suggestion: 'Considere aplicar as sugestões da IA para melhorar a precisão do mapeamento'
-              });
-            }
+      // 🔧 CHECK: Verificar após operação assíncrona
+      if (!isMountedRef.current || signal?.aborted) {
+        console.log('[Validation] Cancelado após sugestões de ML');
+        return;
+      }
+
+      if (mlSuggestions.length > 0) {
+        // Adicionar sugestões de mapeamento baseadas em ML
+        mlSuggestions.forEach(suggestion => {
+          if (suggestion.confidence > 0.7) {
+            suggestions.push(`🤖 ML sugere mapear "${suggestion.csvColumn}" para "${SYSTEM_FIELDS.find(f => f.key === suggestion.suggestedField)?.label || suggestion.suggestedField}" (${Math.round(suggestion.confidence * 100)}% confiança)`);
+            qualityScore += 5; // Bônus por sugestões de ML
           }
-        } catch (error) {
-          console.error('Erro nas sugestões de ML:', error);
-          // Não adicionar alerta de erro para ML, pois é opcional
+        });
+
+        // Adicionar estatísticas de ML
+        const highConfidenceSuggestions = mlSuggestions.filter(s => s.confidence > 0.8);
+        if (highConfidenceSuggestions.length > 0) {
+          alerts.push({
+            type: 'info',
+            title: 'Sugestões de IA Disponíveis',
+            message: `${highConfidenceSuggestions.length} sugestões de mapeamento com alta confiança baseadas no aprendizado de máquina`,
+            suggestion: 'Considere aplicar as sugestões da IA para melhorar a precisão do mapeamento'
+          });
         }
+      }
+    } catch (error) {
+      // Não adicionar erro se foi cancelado ou se ML é opcional
+      if (!signal?.aborted) {
+        console.error('Erro nas sugestões de ML:', error);
+      }
+    }
+
+    // 🔧 CHECK FINAL: Verificar se foi cancelado antes de atualizar estado
+    if (!isMountedRef.current || signal?.aborted) {
+      console.log('[Validation] Cancelado antes de atualizar estado final');
+      return;
+    }
 
     // Gerar preview dos dados mapeados
     csvSampleData.slice(0, 3).forEach(row => {
@@ -661,8 +770,9 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
       suggestions.push('💡 Todos os campos foram validados com sucesso!');
     }
 
-    // Só atualizar estado se o componente ainda estiver montado
-    if (isMountedRef.current) {
+    // 🔧 FIX: Só atualizar estado se o componente ainda estiver montado
+    if (isMountedRef.current && !signal?.aborted) {
+      console.log('[Validation] Validação concluída com sucesso, atualizando estado');
       setRealTimeValidation({
         isValid: alerts.filter(a => a.type === 'error').length === 0,
         alerts,
@@ -670,21 +780,46 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
         suggestions,
         previewData
       });
+    } else {
+      console.log('[Validation] Componente desmontado ou cancelado, não atualizando estado');
     }
   }, [csvSampleData, validateTrackingCodes, validateCEPs, detectDuplicates, businessRules, validateBusinessRules, seasonalPatterns, analyzeSeasonalPatterns, fraudPatterns, analyzeFraudPatterns, csvHeaders, generateMappingSuggestions]);
 
-  // Função segura para atualizar estado apenas se o componente estiver montado
-  const safeSetState = (updater: (prev: RealTimeValidation) => RealTimeValidation) => {
-    if (isMountedRef.current) {
-      setRealTimeValidation(updater);
+  // 🔧 FIX 6: useEffect com debounce e AbortController
+  useEffect(() => {
+    // Não executar validação se não foi analisado ainda
+    if (!isAnalyzed) {
+      return;
     }
-  };
+
+    // Criar novo AbortController para esta validação
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    console.log('[SmartCSVMapping] Iniciando validação debounced');
+    
+    // Executar validação com o signal do AbortController
+    performRealTimeValidation(debouncedMappings, controller.signal);
+
+    // Cleanup: cancelar validação se mappings mudarem ou componente desmontar
+    return () => {
+      console.log('[SmartCSVMapping] Cancelando validação anterior');
+      controller.abort();
+    };
+  }, [debouncedMappings, isAnalyzed, performRealTimeValidation]);
 
   // Executar análise inteligente ao carregar
   useEffect(() => {
     const performAnalysis = async () => {
       try {
         const result = await analyzeCSV(csvHeaders, csvSampleData);
+        
+        // Verificar se ainda está montado após operação assíncrona
+        if (!isMountedRef.current) {
+          console.log('[Analysis] Componente desmontado, abortando');
+          return;
+        }
+
         setAnalysisResult(result);
 
         // Converter resultado para formato de mapeamento
@@ -700,19 +835,22 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
           };
         });
 
-        setMappings(initialMappings);
-        setIsAnalyzed(true);
-
-        // Buscar templates compatíveis
-        const compatible = findCompatibleTemplates(csvHeaders);
         if (isMountedRef.current) {
+          setMappings(initialMappings);
+          setIsAnalyzed(true);
+
+          // Buscar templates compatíveis
+          const compatible = findCompatibleTemplates(csvHeaders);
           setCompatibleTemplates(compatible);
         }
-
-        // Executar validação em tempo real inicial
-        performRealTimeValidation(initialMappings);
       } catch (error) {
         console.error('Erro na análise:', error);
+        
+        // Verificar se ainda está montado
+        if (!isMountedRef.current) {
+          return;
+        }
+
         // Fallback para mapeamento manual
         const fallbackMappings: DetectedField[] = csvHeaders.map(header => ({
           csvColumn: header,
@@ -723,18 +861,21 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
           validationErrors: ['Falha na análise automática']
         }));
 
-        if (isMountedRef.current) {
-          setMappings(fallbackMappings);
-          setIsAnalyzed(true);
-        }
+        setMappings(fallbackMappings);
+        setIsAnalyzed(true);
       }
     };
 
     performAnalysis();
-  }, [csvHeaders, csvSampleData, analyzeCSV, performRealTimeValidation, findCompatibleTemplates]);
+  }, [csvHeaders, csvSampleData, analyzeCSV, findCompatibleTemplates]);
 
   // Atualizar mapeamento manual
   const updateMapping = (csvColumn: string, systemField: string) => {
+    if (!isMountedRef.current) {
+      console.log('[UpdateMapping] Componente desmontado, ignorando atualização');
+      return;
+    }
+
     setMappings(prevMappings =>
       prevMappings.map(mapping => {
         if (mapping.csvColumn === csvColumn) {
@@ -750,16 +891,9 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
         return mapping;
       })
     );
-
-    // Executar validação em tempo real após atualização
-    setTimeout(() => {
-      if (isMountedRef.current) {
-        setMappings(currentMappings => {
-          performRealTimeValidation(currentMappings);
-          return currentMappings;
-        });
-      }
-    }, 100);
+    
+    // A validação será disparada automaticamente pelo useEffect com debounce
+    console.log('[UpdateMapping] Mapeamento atualizado, validação será executada após debounce');
   };
 
   // Verificar se pode prosseguir
@@ -778,6 +912,11 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
 
   // Finalizar mapeamento
   const handleComplete = async () => {
+    if (!isMountedRef.current) {
+      console.log('[HandleComplete] Componente desmontado, abortando');
+      return;
+    }
+
     const mappingObject: Record<string, string> = {};
     mappings.forEach(mapping => {
       if (mapping.detectedField) {
@@ -794,14 +933,20 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
       // Não bloquear o fluxo se o aprendizado falhar
     }
 
+    // Verificar novamente se ainda está montado após operação assíncrona
+    if (!isMountedRef.current) {
+      console.log('[HandleComplete] Componente desmontado após aprendizado');
+      return;
+    }
+
     // Perguntar se quer salvar como template
     const shouldSaveTemplate = window.confirm(
       'Deseja salvar este mapeamento como um template para uso futuro?\n\nIsso permitirá aplicar o mesmo mapeamento rapidamente em arquivos similares.'
     );
 
-    if (shouldSaveTemplate) {
+    if (shouldSaveTemplate && isMountedRef.current) {
       const templateName = prompt('Nome do template:', `Template ${new Date().toLocaleDateString('pt-BR')}`);
-      if (templateName) {
+      if (templateName && isMountedRef.current) {
         const templateDescription = prompt('Descrição opcional do template:');
         const tags = prompt('Tags (separadas por vírgula, opcional):')?.split(',').map(t => t.trim()).filter(t => t);
 
@@ -816,7 +961,10 @@ const SmartCSVMapping: React.FC<SmartCSVMappingProps> = ({
       }
     }
 
-    onMappingComplete(mappingObject);
+    // Verificar uma última vez antes de chamar callback
+    if (isMountedRef.current) {
+      onMappingComplete(mappingObject);
+    }
   };
 
   // Obter ícone de confiança
