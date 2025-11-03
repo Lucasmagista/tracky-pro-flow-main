@@ -48,11 +48,16 @@ function validateEmail(email: string): boolean {
  * Valida telefone brasileiro
  */
 function validatePhone(phone: string): { valid: boolean; fixed?: string; error?: string } {
-  if (!phone) {
-    return { valid: false, error: 'Telefone vazio' };
+  if (!phone || phone.trim() === '') {
+    return { valid: true }; // Telefone vazio é válido (campo opcional)
   }
   
   const cleaned = phone.replace(/\D/g, '');
+  
+  // Se não tem dígitos após limpar, considerar vazio
+  if (cleaned.length === 0) {
+    return { valid: true };
+  }
   
   // Remove código do país se presente
   const phoneToValidate = cleaned.startsWith('55') ? cleaned.substring(2) : cleaned;
@@ -87,9 +92,8 @@ function validatePhone(phone: string): { valid: boolean; fixed?: string; error?:
     };
   }
   
-  // Retorna com código do país
-  const fixed = cleaned.startsWith('55') ? cleaned : `55${phoneToValidate}`;
-  return { valid: true, fixed };
+  // Retorna apenas o número limpo sem código do país
+  return { valid: true, fixed: phoneToValidate };
 }
 
 /**
@@ -247,22 +251,24 @@ export function validateOrder(
     });
   }
   
-  // Valida telefone principal
-  const phoneValidation = validatePhone(order.customer_phone);
-  if (!phoneValidation.valid) {
-    errors.push({
-      row: rowIndex,
-      field: 'customer_phone',
-      value: order.customer_phone,
-      message: phoneValidation.error || 'Telefone inválido',
-      severity: 'error',
-    });
-  } else if (autoFix && phoneValidation.fixed && phoneValidation.fixed !== order.customer_phone) {
-    fixedOrder.customer_phone = phoneValidation.fixed;
-    fixed = true;
+  // Valida telefone principal (apenas se fornecido)
+  if (order.customer_phone && order.customer_phone.trim() !== '') {
+    const phoneValidation = validatePhone(order.customer_phone);
+    if (!phoneValidation.valid) {
+      errors.push({
+        row: rowIndex,
+        field: 'customer_phone',
+        value: order.customer_phone,
+        message: phoneValidation.error || 'Telefone inválido',
+        severity: 'error',
+      });
+    } else if (autoFix && phoneValidation.fixed && phoneValidation.fixed !== order.customer_phone) {
+      fixedOrder.customer_phone = phoneValidation.fixed;
+      fixed = true;
+    }
   }
   
-  // Valida telefone alternativo
+  // Valida telefone alternativo (apenas se fornecido)
   if (order.customer_phone_alt) {
     const phoneAltValidation = validatePhone(order.customer_phone_alt);
     if (!phoneAltValidation.valid) {

@@ -946,46 +946,64 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
       });
 
       // Converter orders para ParsedOrder format para compatibilidade com UI existente
-      const convertedOrders: ParsedOrder[] = result.orders.map((order: NormalizedOrder) => ({
-        tracking_code: order.tracking_code,
-        customer_name: order.customer_name,
-        customer_email: order.customer_email,
-        customer_phone: order.customer_phone || undefined,
-        carrier: order.shipping_address?.country || 'Brasil',
-        status: result.validation.errors.some(e => e.row === result.orders.indexOf(order)) ? 'invalid' :
-                result.validation.warnings.some(w => w.row === result.orders.indexOf(order)) ? 'warning' : 'valid',
-        errors: result.validation.errors
-          .filter(e => e.row === result.orders.indexOf(order))
-          .map(e => e.message),
-        warnings: result.validation.warnings
-          .filter(w => w.row === result.orders.indexOf(order))
-          .map(w => w.message),
-        // Campos adicionais
-        order_value: order.total?.toString(),
-        destination: order.shipping_address?.city,
-        order_date: order.order_date,
-        product_name: order.items?.[0]?.name,
-        quantity: order.items?.[0]?.quantity?.toString(),
-        order_number: order.order_id,
-        notes: order.notes,
-        // Campos de endereço
-        delivery_address: order.shipping_address?.street,
-        delivery_number: order.shipping_address?.number,
-        delivery_complement: order.shipping_address?.complement,
-        delivery_neighborhood: order.shipping_address?.neighborhood,
-        delivery_city: order.shipping_address?.city,
-        delivery_state: order.shipping_address?.state,
-        delivery_zipcode: order.shipping_address?.zip_code,
-        delivery_country: order.shipping_address?.country,
-        // Campos de negócio
-        subtotal: order.items?.reduce((sum, item) => sum + (item.price * item.quantity), 0).toString(),
-        shipping_cost: order.shipping_cost?.toString(),
-        total: order.total.toString(),
-        order_status: order.order_status,
-        shipping_status: order.shipping_status,
-        payment_method: order.payment_method,
-        shipping_method: order.shipping_method
-      }));
+      const convertedOrders: ParsedOrder[] = result.orders.map((order: NormalizedOrder) => {
+        // Função para limpar e validar telefone
+        const cleanPhone = (phone: string | undefined): string | undefined => {
+          if (!phone) return undefined;
+          
+          // Remove todos os caracteres não numéricos
+          const cleaned = phone.toString().replace(/\D/g, '');
+          
+          // Se não tem pelo menos 10 dígitos, não é válido
+          if (cleaned.length < 10 || cleaned.length > 11) return undefined;
+          
+          // Se tem exatamente 10 ou 11 dígitos, é válido
+          if (/^\d{10,11}$/.test(cleaned)) return cleaned;
+          
+          return undefined;
+        };
+
+        return {
+          tracking_code: order.tracking_code,
+          customer_name: order.customer_name,
+          customer_email: order.customer_email,
+          customer_phone: cleanPhone(order.customer_phone),
+          carrier: order.shipping_address?.country || 'Brasil',
+          status: result.validation.errors.some(e => e.row === result.orders.indexOf(order)) ? 'invalid' :
+                  result.validation.warnings.some(w => w.row === result.orders.indexOf(order)) ? 'warning' : 'valid',
+          errors: result.validation.errors
+            .filter(e => e.row === result.orders.indexOf(order))
+            .map(e => e.message),
+          warnings: result.validation.warnings
+            .filter(w => w.row === result.orders.indexOf(order))
+            .map(w => w.message),
+          // Campos adicionais
+          order_value: order.total?.toString(),
+          destination: order.shipping_address?.city,
+          order_date: order.order_date,
+          product_name: order.items?.[0]?.name,
+          quantity: order.items?.[0]?.quantity?.toString(),
+          order_number: order.order_id,
+          notes: order.notes,
+          // Campos de endereço
+          delivery_address: order.shipping_address?.street,
+          delivery_number: order.shipping_address?.number,
+          delivery_complement: order.shipping_address?.complement,
+          delivery_neighborhood: order.shipping_address?.neighborhood,
+          delivery_city: order.shipping_address?.city,
+          delivery_state: order.shipping_address?.state,
+          delivery_zipcode: order.shipping_address?.zip_code,
+          delivery_country: order.shipping_address?.country,
+          // Campos de negócio
+          subtotal: order.items?.reduce((sum, item) => sum + (item.price * item.quantity), 0).toString(),
+          shipping_cost: order.shipping_cost?.toString(),
+          total: order.total.toString(),
+          order_status: order.order_status,
+          shipping_status: order.shipping_status,
+          payment_method: order.payment_method,
+          shipping_method: order.shipping_method
+        };
+      });
 
       setParsedOrders(convertedOrders);
       
@@ -1989,38 +2007,39 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
 
           {/* Preview Modal */}
           <Dialog open={showPreview} onOpenChange={handleClosePreview}>
-            <DialogContent className="max-w-6xl max-h-[80vh] overflow-y-auto">
-              <DialogHeader>
-                <DialogTitle className="flex items-center gap-2">
-                  <Eye className="h-5 w-5" />
+            <DialogContent className="max-w-[95vw] w-[95vw] max-h-[95vh] h-[95vh] overflow-hidden flex flex-col">
+              <DialogHeader className="flex-shrink-0">
+                <DialogTitle className="flex items-center gap-2 text-2xl">
+                  <Eye className="h-6 w-6" />
                   Preview da Importação
                 </DialogTitle>
-                <DialogDescription>
+                <DialogDescription className="text-base">
                   Revise os dados antes de confirmar a importação. {parsedOrders.length} pedidos encontrados.
                 </DialogDescription>
               </DialogHeader>
 
-              {/* 🆕 Informações de Detecção Inteligente */}
-              {showIntelligentPreview && processingResult && (
-                <div className="mb-6 p-4 bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg border border-blue-200">
-                  <div className="flex items-start justify-between mb-3">
-                    <div>
-                      <h4 className="font-semibold text-blue-900 flex items-center gap-2 mb-1">
-                        <CheckCircle className="w-5 h-5 text-blue-600" />
-                        Detecção Automática
-                      </h4>
-                      <p className="text-sm text-blue-700">
-                        Sistema identificou automaticamente o formato do arquivo
-                      </p>
+              <div className="flex-1 overflow-y-auto space-y-6 pr-2">
+                {/* 🆕 Informações de Detecção Inteligente */}
+                {showIntelligentPreview && processingResult && (
+                  <div className="p-6 bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg border-2 border-blue-200">
+                    <div className="flex items-start justify-between mb-4">
+                      <div>
+                        <h4 className="text-xl font-bold text-blue-900 flex items-center gap-2 mb-2">
+                          <CheckCircle className="w-6 h-6 text-blue-600" />
+                          Detecção Automática
+                        </h4>
+                        <p className="text-base text-blue-700">
+                          Sistema identificou automaticamente o formato do arquivo
+                        </p>
+                      </div>
+                      <Badge variant="secondary" className="bg-blue-100 text-blue-800 border-blue-300 text-lg px-4 py-2">
+                        {processingResult.detection.confidence}% confiança
+                      </Badge>
                     </div>
-                    <Badge variant="secondary" className="bg-blue-100 text-blue-800 border-blue-300">
-                      {processingResult.detection.confidence}% confiança
-                    </Badge>
-                  </div>
                   
-                  <div className="grid md:grid-cols-3 gap-4">
-                    <div className="space-y-1">
-                      <div className="text-xs font-medium text-blue-600 uppercase">Plataforma</div>
+                  <div className="grid md:grid-cols-3 gap-6">
+                    <div className="space-y-2">
+                      <div className="text-sm font-medium text-blue-600 uppercase">Plataforma</div>
                       <div className="font-semibold text-blue-900 text-lg">
                         {processingResult.detection.platform === 'nuvemshop' ? '🛒 NuvemShop' :
                          processingResult.detection.platform === 'shopify' ? '🛍️ Shopify' :
@@ -2028,20 +2047,20 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
                          '📦 Formato Personalizado'}
                       </div>
                     </div>
-                    <div className="space-y-1">
-                      <div className="text-xs font-medium text-blue-600 uppercase">Headers Detectados</div>
-                      <div className="font-semibold text-blue-900 text-lg">
+                    <div className="space-y-2">
+                      <div className="text-sm font-medium text-blue-600 uppercase">Headers Detectados</div>
+                      <div className="font-semibold text-blue-900 text-xl">
                         {processingResult.detection.matchedHeaders.length} de {processingResult.detection.matchedHeaders.length} campos
                       </div>
                     </div>
-                    <div className="space-y-1">
-                      <div className="text-xs font-medium text-blue-600 uppercase">Validação</div>
-                      <div className="flex gap-2">
-                        <Badge variant="outline" className="bg-green-50 text-green-700 border-green-300">
+                    <div className="space-y-2">
+                      <div className="text-sm font-medium text-blue-600 uppercase">Validação</div>
+                      <div className="flex gap-2 flex-wrap">
+                        <Badge variant="outline" className="bg-green-50 text-green-700 border-green-300 text-base px-3 py-1">
                           {processingResult.validation.stats.validOrders} válidos
                         </Badge>
                         {processingResult.validation.warnings.length > 0 && (
-                          <Badge variant="outline" className="bg-yellow-50 text-yellow-700 border-yellow-300">
+                          <Badge variant="outline" className="bg-yellow-50 text-yellow-700 border-yellow-300 text-base px-3 py-1">
                             {processingResult.validation.warnings.length} avisos
                           </Badge>
                         )}
@@ -2050,132 +2069,132 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
                   </div>
 
                   {processingResult.detection.suggestions && processingResult.detection.suggestions.length > 0 && (
-                    <Alert className="mt-3 border-blue-300 bg-blue-50">
-                      <AlertTriangle className="h-4 w-4 text-blue-600" />
-                      <AlertDescription className="text-sm text-blue-800">
+                    <Alert className="mt-4 border-blue-300 bg-blue-50">
+                      <AlertTriangle className="h-5 w-5 text-blue-600" />
+                      <AlertDescription className="text-base text-blue-800">
                         <strong>Sugestões:</strong> {processingResult.detection.suggestions.join('. ')}
                       </AlertDescription>
                     </Alert>
                   )}
-                </div>
-              )}
-
-              <div className="space-y-4">
-                {/* Summary */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <div className="text-center p-4 bg-green-50 rounded-lg border border-green-200">
-                    <div className="text-3xl font-bold text-green-600 mb-1">
-                      {parsedOrders.filter(o => o.status === 'valid').length}
-                    </div>
-                    <div className="text-sm text-green-700 font-medium">Válidos</div>
-                    <div className="text-xs text-green-600 mt-1">
-                      {parsedOrders.length > 0 ? Math.round((parsedOrders.filter(o => o.status === 'valid').length / parsedOrders.length) * 100) : 0}% do total
-                    </div>
                   </div>
-                  <div className="text-center p-4 bg-yellow-50 rounded-lg border border-yellow-200">
-                    <div className="text-3xl font-bold text-yellow-600 mb-1">
+                )}
+
+                <div className="space-y-6">
+                  {/* Summary */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                    <div className="text-center p-6 bg-green-50 rounded-lg border-2 border-green-200">
+                      <div className="text-5xl font-bold text-green-600 mb-2">
+                        {parsedOrders.filter(o => o.status === 'valid').length}
+                      </div>
+                      <div className="text-base text-green-700 font-semibold">Válidos</div>
+                      <div className="text-sm text-green-600 mt-2">
+                        {parsedOrders.length > 0 ? Math.round((parsedOrders.filter(o => o.status === 'valid').length / parsedOrders.length) * 100) : 0}% do total
+                      </div>
+                    </div>
+                  <div className="text-center p-6 bg-yellow-50 rounded-lg border-2 border-yellow-200">
+                    <div className="text-5xl font-bold text-yellow-600 mb-2">
                       {parsedOrders.filter(o => o.status === 'warning').length}
                     </div>
-                    <div className="text-sm text-yellow-700 font-medium">Com Avisos</div>
-                    <div className="text-xs text-yellow-600 mt-1">
+                    <div className="text-base text-yellow-700 font-semibold">Com Avisos</div>
+                    <div className="text-sm text-yellow-600 mt-2">
                       Precisam atenção
                     </div>
                   </div>
-                  <div className="text-center p-4 bg-red-50 rounded-lg border border-red-200">
-                    <div className="text-3xl font-bold text-red-600 mb-1">
+                  <div className="text-center p-6 bg-red-50 rounded-lg border-2 border-red-200">
+                    <div className="text-5xl font-bold text-red-600 mb-2">
                       {parsedOrders.filter(o => o.status === 'invalid').length}
                     </div>
-                    <div className="text-sm text-red-700 font-medium">Inválidos</div>
-                    <div className="text-xs text-red-600 mt-1">
+                    <div className="text-base text-red-700 font-semibold">Inválidos</div>
+                    <div className="text-sm text-red-600 mt-2">
                       Não podem ser importados
                     </div>
                   </div>
-                  <div className="text-center p-4 bg-blue-50 rounded-lg border border-blue-200">
-                    <div className="text-3xl font-bold text-blue-600 mb-1">
+                  <div className="text-center p-6 bg-blue-50 rounded-lg border-2 border-blue-200">
+                    <div className="text-5xl font-bold text-blue-600 mb-2">
                       {parsedOrders.length}
                     </div>
-                    <div className="text-sm text-blue-700 font-medium">Total</div>
-                    <div className="text-xs text-blue-600 mt-1">
+                    <div className="text-base text-blue-700 font-semibold">Total</div>
+                    <div className="text-sm text-blue-600 mt-2">
                       Pedidos processados
                     </div>
                   </div>
                 </div>
 
                 {/* Field Mapping Summary */}
-                <div className="bg-muted/30 p-4 rounded-lg">
-                  <h4 className="font-medium mb-3 text-muted-foreground flex items-center gap-2">
-                    <Package className="w-4 h-4" />
+                <div className="bg-muted/30 p-6 rounded-lg border-2">
+                  <h4 className="text-lg font-semibold mb-4 text-muted-foreground flex items-center gap-2">
+                    <Package className="w-5 h-5" />
                     Mapeamento de Campos Detectado
                   </h4>
-                  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
-                    <div className="space-y-2">
+                  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 text-base">
+                    <div className="space-y-3">
                       <div className="flex items-center gap-2">
-                        <CheckCircle className="w-4 h-4 text-green-600" />
-                        <span className="font-medium">Campos Obrigatórios:</span>
+                        <CheckCircle className="w-5 h-5 text-green-600" />
+                        <span className="font-semibold">Campos Obrigatórios:</span>
                       </div>
-                      <div className="ml-6 space-y-1">
+                      <div className="ml-7 space-y-2">
                         <div className="flex justify-between">
                           <span>Código de Rastreio</span>
-                          <Badge variant="secondary" className="text-xs">
+                          <Badge variant="secondary" className="text-sm">
                             {parsedOrders.filter(o => o.tracking_code).length}/{parsedOrders.length}
                           </Badge>
                         </div>
                         <div className="flex justify-between">
                           <span>Nome do Cliente</span>
-                          <Badge variant="secondary" className="text-xs">
+                          <Badge variant="secondary" className="text-sm">
                             {parsedOrders.filter(o => o.customer_name).length}/{parsedOrders.length}
                           </Badge>
                         </div>
                         <div className="flex justify-between">
                           <span>Email do Cliente</span>
-                          <Badge variant="secondary" className="text-xs">
+                          <Badge variant="secondary" className="text-sm">
                             {parsedOrders.filter(o => o.customer_email).length}/{parsedOrders.length}
                           </Badge>
                         </div>
                       </div>
                     </div>
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       <div className="flex items-center gap-2">
-                        <CheckCircle className="w-4 h-4 text-blue-600" />
-                        <span className="font-medium">Campos Opcionais:</span>
+                        <CheckCircle className="w-5 h-5 text-blue-600" />
+                        <span className="font-semibold">Campos Opcionais:</span>
                       </div>
-                      <div className="ml-6 space-y-1">
+                      <div className="ml-7 space-y-2">
                         <div className="flex justify-between">
                           <span>Telefone</span>
-                          <Badge variant="outline" className="text-xs">
+                          <Badge variant="outline" className="text-sm">
                             {parsedOrders.filter(o => o.customer_phone).length}/{parsedOrders.length}
                           </Badge>
                         </div>
                         <div className="flex justify-between">
                           <span>Valor do Pedido</span>
-                          <Badge variant="outline" className="text-xs">
+                          <Badge variant="outline" className="text-sm">
                             {parsedOrders.filter(o => o.order_value).length}/{parsedOrders.length}
                           </Badge>
                         </div>
                         <div className="flex justify-between">
                           <span>Produto</span>
-                          <Badge variant="outline" className="text-xs">
+                          <Badge variant="outline" className="text-sm">
                             {parsedOrders.filter(o => o.product_name).length}/{parsedOrders.length}
                           </Badge>
                         </div>
                       </div>
                     </div>
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       <div className="flex items-center gap-2">
-                        <CheckCircle className="w-4 h-4 text-purple-600" />
-                        <span className="font-medium">Transportadoras:</span>
+                        <CheckCircle className="w-5 h-5 text-purple-600" />
+                        <span className="font-semibold">Transportadoras:</span>
                       </div>
-                      <div className="ml-6 space-y-1">
+                      <div className="ml-7 space-y-2">
                         {Array.from(new Set(parsedOrders.map(o => o.carrier).filter(c => c))).slice(0, 3).map(carrier => (
                           <div key={carrier} className="flex justify-between">
                             <span className="truncate mr-2">{carrier}</span>
-                            <Badge variant="secondary" className="text-xs">
+                            <Badge variant="secondary" className="text-sm">
                               {parsedOrders.filter(o => o.carrier === carrier).length}
                             </Badge>
                           </div>
                         ))}
                         {Array.from(new Set(parsedOrders.map(o => o.carrier).filter(c => c))).length > 3 && (
-                          <div className="text-xs text-muted-foreground">
+                          <div className="text-sm text-muted-foreground">
                             +{Array.from(new Set(parsedOrders.map(o => o.carrier).filter(c => c))).length - 3} outras
                           </div>
                         )}
@@ -2184,26 +2203,26 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
                   </div>
                 </div>
 
-                {/* Additional Info */}
-                <div className="grid md:grid-cols-2 gap-4 text-sm">
-                  <div className="bg-muted/30 p-4 rounded-lg">
-                    <h4 className="font-medium mb-2 text-muted-foreground">Transportadoras Detectadas</h4>
-                    <div className="space-y-1">
+                {/* Preview Table or List of Orders */}
+                <div className="grid md:grid-cols-2 gap-6">
+                  <div className="bg-muted/30 p-6 rounded-lg border-2">
+                    <h4 className="text-base font-semibold mb-3 text-muted-foreground">Transportadoras Detectadas</h4>
+                    <div className="space-y-2">
                       {Array.from(new Set(parsedOrders.map(o => o.carrier).filter(c => c))).map(carrier => (
-                        <div key={carrier} className="flex justify-between">
+                        <div key={carrier} className="flex justify-between text-base">
                           <span>{carrier}</span>
-                          <Badge variant="secondary">
+                          <Badge variant="secondary" className="text-sm">
                             {parsedOrders.filter(o => o.carrier === carrier).length}
                           </Badge>
                         </div>
                       ))}
                     </div>
                   </div>
-                  <div className="bg-muted/30 p-4 rounded-lg">
-                    <h4 className="font-medium mb-2 text-muted-foreground">Principais Problemas</h4>
-                    <div className="space-y-1">
+                  <div className="bg-muted/30 p-6 rounded-lg border-2">
+                    <h4 className="text-base font-semibold mb-3 text-muted-foreground">Principais Problemas</h4>
+                    <div className="space-y-2">
                       {parsedOrders.filter(o => o.errors.length > 0).length > 0 && (
-                        <div className="flex justify-between text-red-600">
+                        <div className="flex justify-between text-red-600 text-base">
                           <span>Erros de validação</span>
                           <Badge variant="destructive">
                             {parsedOrders.filter(o => o.errors.length > 0).length}
@@ -2231,7 +2250,7 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
                 </div>
 
                 {/* Table */}
-                <div className="border rounded-lg overflow-hidden">
+                <div className="border rounded-lg overflow-hidden bg-background">
                   <Table>
                     <TableHeader>
                       <TableRow className="bg-muted/50">
@@ -2252,13 +2271,13 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
                         <TableHead className="w-32">Problemas</TableHead>
                       </TableRow>
                     </TableHeader>
-                    <TableBody>
+                    <TableBody className="bg-background">
                       {parsedOrders.map((order, index) => (
-                        <TableRow key={index} className={
-                          order.status === 'invalid' ? 'bg-red-50' :
-                          order.status === 'warning' ? 'bg-yellow-50' : 'bg-green-50'
-                        }>
-                          <TableCell>
+                        <TableRow 
+                          key={index} 
+                          className="hover:bg-muted/30 bg-background"
+                        >
+                          <TableCell className="bg-inherit">
                             <div className="flex flex-col items-center gap-1">
                               {order.status === 'valid' && <CheckCircle className="w-5 h-5 text-green-600" />}
                               {order.status === 'warning' && <AlertTriangle className="w-5 h-5 text-yellow-600" />}
@@ -2269,68 +2288,75 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
                               </span>
                             </div>
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="bg-inherit">
                             <div className="font-mono text-sm bg-muted px-2 py-1 rounded">
-                              {order.tracking_code || '-'}
+                              {order.tracking_code || <span className="text-muted-foreground italic">Não informado</span>}
                             </div>
                           </TableCell>
-                          <TableCell className="font-medium max-w-32">
-                            <div className="truncate" title={order.customer_name}>
-                              {order.customer_name || '-'}
+                          <TableCell className="font-medium max-w-32 bg-inherit">
+                            <div className="truncate" title={order.customer_name || 'Nome não informado'}>
+                              {order.customer_name || <span className="text-muted-foreground italic">Nome não informado</span>}
                             </div>
                           </TableCell>
-                          <TableCell className="text-sm font-mono">
+                          <TableCell className="text-sm font-mono bg-inherit">
                             {order.cpf_cnpj ? (
                               <span className={order.cpf_cnpj.replace(/\D/g, '').length === 11 ? 'text-blue-600' : 'text-purple-600'}>
                                 {order.cpf_cnpj.replace(/\D/g, '').length === 11 ? 'CPF' : 'CNPJ'}: {order.cpf_cnpj}
                               </span>
-                            ) : '-'}
+                            ) : <span className="text-muted-foreground italic">-</span>}
                           </TableCell>
-                          <TableCell className="text-sm max-w-40">
-                            <div className="truncate" title={order.customer_email}>
-                              {order.customer_email || '-'}
+                          <TableCell className="text-sm max-w-40 bg-inherit">
+                            <div className="truncate" title={order.customer_email || 'Email não informado'}>
+                              {order.customer_email || <span className="text-muted-foreground italic">Email não informado</span>}
                             </div>
                           </TableCell>
-                          <TableCell className="text-sm">
-                            {order.customer_phone || '-'}
+                          <TableCell className="text-sm bg-inherit">
+                            {order.customer_phone && order.customer_phone.length >= 10 && order.customer_phone.length <= 11 && /^\d+$/.test(order.customer_phone) ? (
+                              <span className="font-mono">{order.customer_phone}</span>
+                            ) : (
+                              <span className="text-muted-foreground italic">Telefone não informado</span>
+                            )}
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="bg-inherit">
                             <Badge variant="outline" className="font-medium">
-                              {order.carrier || 'Não informado'}
+                              {order.carrier || <span className="text-muted-foreground italic">Não informado</span>}
                             </Badge>
                           </TableCell>
-                          <TableCell className="text-sm font-medium">
-                            {order.order_value ? `R$ ${order.order_value}` : '-'}
+                          <TableCell className="text-sm font-medium bg-inherit">
+                            {order.order_value && !isNaN(parseFloat(order.order_value)) ? 
+                              `R$ ${parseFloat(order.order_value).toFixed(2)}` : 
+                              <span className="text-muted-foreground italic">Valor não informado</span>
+                            }
                           </TableCell>
-                          <TableCell className="text-sm max-w-40">
-                            <div className="truncate" title={order.product_name}>
-                              {order.product_name || '-'}
+                          <TableCell className="text-sm max-w-40 bg-inherit">
+                            <div className="truncate" title={order.product_name || 'Produto não informado'}>
+                              {order.product_name || <span className="text-muted-foreground italic">Produto não informado</span>}
                             </div>
                           </TableCell>
-                          <TableCell className="text-sm text-center">
-                            {order.quantity || '-'}
+                          <TableCell className="text-sm text-center bg-inherit">
+                            {order.quantity || <span className="text-muted-foreground italic">-</span>}
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="bg-inherit">
                             <Badge variant={order.order_status ? "secondary" : "outline"} className="text-xs">
-                              {order.order_status || '-'}
+                              {order.order_status || <span className="text-muted-foreground italic">-</span>}
                             </Badge>
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="bg-inherit">
                             <Badge variant={order.shipping_status ? "secondary" : "outline"} className="text-xs">
-                              {order.shipping_status || '-'}
+                              {order.shipping_status || <span className="text-muted-foreground italic">-</span>}
                             </Badge>
                           </TableCell>
-                          <TableCell className="text-sm max-w-24">
-                            <div className="truncate" title={order.delivery_city}>
-                              {order.delivery_city || '-'}
+                          <TableCell className="text-sm max-w-24 bg-inherit">
+                            <div className="truncate" title={order.delivery_city || 'Cidade não informada'}>
+                              {order.delivery_city || <span className="text-muted-foreground italic">Não informado</span>}
                             </div>
                           </TableCell>
-                          <TableCell className="text-sm font-mono max-w-24">
-                            <div className="truncate" title={order.order_number}>
-                              {order.order_number || '-'}
+                          <TableCell className="text-sm font-mono max-w-24 bg-inherit">
+                            <div className="truncate" title={order.order_number || 'Pedido não informado'}>
+                              {order.order_number || <span className="text-muted-foreground italic">-</span>}
                             </div>
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="bg-inherit">
                             <div className="space-y-1 max-w-32">
                               {order.errors.map((error, i) => (
                                 <div key={i} className="text-xs text-red-600 flex items-start gap-1">
@@ -2358,18 +2384,21 @@ Número do Pedido*,E-mail*,Data,Status do Pedido,Status do Pagamento,Status do E
                   </Table>
                 </div>
 
-                <div className="flex justify-end gap-3 pt-4 border-t">
-                  <Button variant="outline" onClick={handleClosePreview}>
+                <div className="flex justify-end gap-3 pt-6 border-t mt-6">
+                  <Button variant="outline" onClick={handleClosePreview} size="lg">
                     Cancelar
                   </Button>
                   <Button
                     onClick={executeImport}
                     disabled={loading || parsedOrders.filter(o => o.status === 'valid').length === 0}
+                    size="lg"
+                    className="min-w-[200px]"
                   >
                     {loading ? "Importando..." : `Importar ${parsedOrders.filter(o => o.status === 'valid').length} Pedidos`}
                   </Button>
                 </div>
-              </div>
+                </div> {/* Fecha space-y-6 */}
+              </div> {/* Fecha flex-1 overflow-y-auto */}
             </DialogContent>
           </Dialog>
 

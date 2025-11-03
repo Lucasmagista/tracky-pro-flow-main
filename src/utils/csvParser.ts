@@ -45,7 +45,8 @@ export async function detectEncoding(file: File): Promise<string> {
     const chunk = await file.slice(0, 65536).arrayBuffer();
     const uint8Array = new Uint8Array(chunk);
     
-    const detected = chardet.detect(Buffer.from(uint8Array));
+    // chardet funciona com Uint8Array diretamente no browser
+    const detected = chardet.detect(uint8Array);
     const encoding = detected ? (Array.isArray(detected) ? detected[0].name : detected) : 'UTF-8';
     
     console.log(`[CSVParser] Encoding detectado: ${encoding}`);
